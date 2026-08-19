@@ -546,7 +546,7 @@ struct CameraContentView: View {
         } label: {
             Group {
                 if seconds == 0 {
-                    Text("Off")
+                    Text("Off", bundle: .module)
                 } else {
                     HStack(spacing: 0) {
                         Text(seconds, format: .number)
@@ -710,8 +710,11 @@ struct CameraContentView: View {
     /// Modern Apple Camera Mode Switcher with Liquid Glass styling & Spring Transition
     private var systemModeSwitcher: some View {
         HStack(spacing: 2) {
-            modeOption(title: "VIDEO", isActive: !state.isPhotoMode) { onSetPhotoMode(false) }
-            modeOption(title: "PHOTO", isActive: state.isPhotoMode) { onSetPhotoMode(true) }
+            // `.cameraKit`, not a bare literal: a `LocalizedStringResource` literal resolves
+            // against `Bundle.main`, which is the host app, so these two would read `VIDEO`
+            // and `PHOTO` in every language outside this project.
+            modeOption(title: .cameraKit("VIDEO"), isActive: !state.isPhotoMode) { onSetPhotoMode(false) }
+            modeOption(title: .cameraKit("PHOTO"), isActive: state.isPhotoMode) { onSetPhotoMode(true) }
         }
         .padding(3)
         .background {
@@ -814,7 +817,7 @@ struct CameraContentView: View {
             }
             onClearFocusLock()
         } label: {
-            Text("AE/AF LOCK")
+            Text("AE/AF LOCK", bundle: .module)
                 .font(.system(size: 12, weight: .bold, design: .rounded))
                 .foregroundStyle(Color.black)
                 .padding(.horizontal, theme.spacingS)
@@ -833,11 +836,11 @@ struct CameraContentView: View {
                 .font(.system(size: 34))
                 .foregroundStyle(Color.yellow)
 
-            Text("Camera is unavailable")
+            Text("Camera is unavailable", bundle: .module)
                 .font(theme.titleFont)
                 .foregroundStyle(Color.white)
 
-            Text("Another app or a phone call is using the camera.")
+            Text("Another app or a phone call is using the camera.", bundle: .module)
                 .font(theme.bodyFont)
                 .foregroundStyle(Color.white.opacity(0.8))
                 .multilineTextAlignment(.center)
@@ -858,11 +861,11 @@ struct CameraContentView: View {
                 .font(.system(size: 48))
                 .foregroundStyle(Color.white.opacity(0.6))
 
-            Text("Camera access is required")
+            Text("Camera access is required", bundle: .module)
                 .font(theme.titleFont)
                 .foregroundStyle(Color.white)
 
-            Text("Please enable camera access in Settings to take encrypted photos directly into your vault.")
+            Text("Please enable camera access in Settings to take encrypted photos directly into your vault.", bundle: .module)
                 .font(theme.bodyFont)
                 .foregroundStyle(Color.white.opacity(0.8))
                 .multilineTextAlignment(.center)
@@ -875,7 +878,7 @@ struct CameraContentView: View {
                     UIApplication.shared.open(url)
                 }
             } label: {
-                Text("Open Settings")
+                Text("Open Settings", bundle: .module)
                     .font(theme.bodyStrongFont)
                     .foregroundStyle(Color.black)
                     .padding(.horizontal, theme.spacingL)

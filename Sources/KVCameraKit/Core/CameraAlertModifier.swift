@@ -13,7 +13,7 @@ extension View {
             Alert(
                 title: Text(alert.title),
                 message: Text(alert.message),
-                dismissButton: .default(Text("Close"), action: onDismiss)
+                dismissButton: .default(Text("Close", bundle: .module), action: onDismiss)
             )
         }
     }

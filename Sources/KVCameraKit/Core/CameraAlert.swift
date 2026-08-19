@@ -20,3 +20,16 @@ public struct CameraAlert: Equatable, Identifiable, Sendable {
         self.message = message
     }
 }
+
+extension LocalizedStringResource {
+
+    /// Resolves against this package's own tables.
+    ///
+    /// A bare literal defaults to `Bundle.main`, which is the *host app* — so in any
+    /// project that does not happen to carry these keys the alert would show the key
+    /// itself. Nothing crashes and nothing logs, which is exactly why it needs a named
+    /// helper rather than a convention to remember.
+    static func cameraKit(_ key: String.LocalizationValue) -> LocalizedStringResource {
+        LocalizedStringResource(key, bundle: .atURL(Bundle.module.bundleURL))
+    }
+}

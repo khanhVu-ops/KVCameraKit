@@ -17,7 +17,11 @@ let package = Package(
     targets: [
         .target(
             name: "KVCameraKit",
-            path: "Sources/KVCameraKit"
+            path: "Sources/KVCameraKit",
+            // Its own string tables. A package whose text resolves from the host bundle
+            // renders nothing but keys in any other project — which would have made
+            // "reusable" untrue in the one way nobody notices until a user sees it.
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "KVCameraKitTests",

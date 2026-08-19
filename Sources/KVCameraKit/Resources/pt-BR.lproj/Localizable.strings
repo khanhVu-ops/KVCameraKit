@@ -1,0 +1,16 @@
+/* KVCameraKit — the camera's own strings.
+   Its own table because a package whose text resolves from the host bundle shows
+   nothing but keys in any other project. */
+"Camera access is required" = "O acesso à câmera é necessário";
+"Please enable camera access in Settings to take encrypted photos directly into your vault." = "Ative o acesso à câmera nos Ajustes para tirar fotos criptografadas diretamente no seu cofre.";
+"Open Settings" = "Abrir Ajustes";
+"Camera is unavailable" = "A câmera está indisponível";
+"Another app or a phone call is using the camera." = "Outro app ou uma chamada está usando a câmera.";
+"PHOTO" = "FOTO";
+"VIDEO" = "VÍDEO";
+"AE/AF LOCK" = "TRAVA AE/AF";
+"Off" = "Desativado";
+"Photo could not be saved" = "Não foi possível salvar a foto";
+"Video could not be saved" = "Não foi possível salvar o vídeo";
+"Close" = "Fechar";
+"Error" = "Erro";

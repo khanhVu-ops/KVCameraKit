@@ -428,7 +428,7 @@ final class CameraViewModel: ObservableObject {
                     state.captureStage = .idle
                 }
                 state.isSealing = false
-                state.alert = CameraAlert(title: "Error", message: "Photo could not be saved")
+                state.alert = CameraAlert(title: .cameraKit("Error"), message: .cameraKit("Photo could not be saved"))
                 CameraHaptic.error.play()
             }
         }
@@ -479,7 +479,7 @@ final class CameraViewModel: ObservableObject {
                 CameraHaptic.success.play()
             } catch {
                 state.isSealing = false
-                state.alert = CameraAlert(title: "Error", message: "Video could not be saved")
+                state.alert = CameraAlert(title: .cameraKit("Error"), message: .cameraKit("Video could not be saved"))
                 CameraHaptic.error.play()
             }
         }
