@@ -46,37 +46,61 @@ final class CapturedPhotoDecoderTests: XCTestCase {
     /// A non-`.up` orientation has to be baked into pixels, because `UIImage.jpegData` is
     /// not reliably upright otherwise. The proof is that the sides swap.
     func test_uprightJPEGBakesARotationIntoThePixels() throws {
-        let wide = UIGraphicsImageRenderer(size: CGSize(width: 40, height: 20))
-            .image { context in
-                UIColor.systemIndigo.setFill()
-                context.fill(CGRect(x: 0, y: 0, width: 40, height: 20))
-            }
-        let cgImage = try XCTUnwrap(wide.cgImage)
+        let cgImage = try Self.opaqueCGImage(width: 40, height: 20)
 
         let rotated = try XCTUnwrap(CapturedPhotoDecoder.uprightJPEG(from: cgImage, orientation: .right))
         let decoded = try XCTUnwrap(UIImage(data: rotated))
 
-        // The ratio, not the pixel count: `UIGraphicsImageRenderer` renders at the screen
-        // scale, so the absolute size depends on which simulator this runs on. The claim
-        // being made is that a landscape frame came back portrait.
-        XCTAssertEqual(decoded.size.height / decoded.size.width, 2, accuracy: 0.01)
+        // Exact pixels, not a ratio. A ratio was all this could assert while the renderer
+        // ran at the screen scale — see `test_uprightJPEGDoesNotResampleTheFrame`.
+        XCTAssertEqual(decoded.size, CGSize(width: 20, height: 40))
         // And the rotation is in the pixels rather than in a flag a later consumer has to
         // honour — which is the entire reason this function exists.
         XCTAssertEqual(decoded.imageOrientation, .up)
     }
 
-    /// `.up` is the common case and must not be a no-op that silently changes the ratio.
+    /// `.up` is the common case and must not be a no-op that silently changes the size.
     func test_uprightJPEGLeavesAnAlreadyUprightFrameAlone() throws {
-        let tall = UIGraphicsImageRenderer(size: CGSize(width: 20, height: 40))
-            .image { context in
-                UIColor.systemIndigo.setFill()
-                context.fill(CGRect(x: 0, y: 0, width: 20, height: 40))
-            }
-        let cgImage = try XCTUnwrap(tall.cgImage)
+        let cgImage = try Self.opaqueCGImage(width: 20, height: 40)
 
         let data = try XCTUnwrap(CapturedPhotoDecoder.uprightJPEG(from: cgImage, orientation: .up))
         let decoded = try XCTUnwrap(UIImage(data: data))
 
-        XCTAssertEqual(decoded.size.height / decoded.size.width, 2, accuracy: 0.01)
+        XCTAssertEqual(decoded.size, CGSize(width: 20, height: 40))
+    }
+
+    /// One output pixel per source pixel.
+    ///
+    /// This is a regression test with a specific bug behind it: the renderer used to run at
+    /// the default *screen* scale, so a 40x20 source came back 120x60 on a 3x simulator —
+    /// nine times the pixels to interpolate and JPEG-encode, on the code path between the
+    /// shutter closing and the first frame of feedback. Upsampling never looks wrong, which
+    /// is why it survived; it only costs the capture animation the time it exists to hide.
+    func test_uprightJPEGDoesNotResampleTheFrame() throws {
+        let cgImage = try Self.opaqueCGImage(width: 40, height: 20)
+        XCTAssertEqual(cgImage.width, 40, "the source itself must be 1x for this to mean anything")
+
+        for orientation in [CGImagePropertyOrientation.up, .right, .down, .left] {
+            let data = try XCTUnwrap(CapturedPhotoDecoder.uprightJPEG(from: cgImage, orientation: orientation))
+            let decoded = try XCTUnwrap(UIImage(data: data))
+            // `UIImage(data:)` reports a scale of 1 for JPEG, so `size` is the pixel count.
+            let pixels = decoded.size.width * decoded.size.height
+            XCTAssertEqual(pixels, 800, "\(orientation) resampled: \(decoded.size)")
+        }
+    }
+
+    /// A source at 1x regardless of the screen this runs on, so the assertions above are
+    /// about `uprightJPEG` and not about the simulator that produced the input.
+    private static func opaqueCGImage(width: Int, height: Int) throws -> CGImage {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+
+        let size = CGSize(width: width, height: height)
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.systemIndigo.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+        }
+        return try XCTUnwrap(image.cgImage)
     }
 }
