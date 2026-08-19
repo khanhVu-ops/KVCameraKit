@@ -141,6 +141,12 @@ protocol CameraCapturing: AnyObject, Sendable {
 
     /// Handed the live preview layer so rotation can be driven from one
     /// `RotationCoordinator` instead of a hard-coded `.portrait` on every connection.
+    ///
+    /// `@MainActor` because the argument is a layer a `UIView` owns, and the only caller is
+    /// `makeUIView`. Spelling it out is what lets the rotation controller be main-actor
+    /// too — the alternative was hopping a `CALayer` across isolation domains, which Swift 6
+    /// correctly refuses.
+    @MainActor
     func attachPreviewLayer(_ layer: AVCaptureVideoPreviewLayer)
 
     /// Publishes zoom, exposure and the self-timer to Camera Control. A no-op where the

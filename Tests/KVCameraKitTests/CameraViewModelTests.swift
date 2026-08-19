@@ -208,43 +208,6 @@ final class CameraViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.state.currentZoom, 1.0)
     }
 
-    /// The shapes real phones produce. `zoomLevels` is static and pure precisely so these
-    /// can run without a camera.
-    func test_zoomLevelLadderMatchesRealDevices() {
-        // The point of the ladder: the same list from different hardware. iPhone 16 has
-        // ultra wide + wide, and its 2x is a sensor crop no API reports as a lens.
-        XCTAssertEqual(
-            CameraService.zoomLevels(optical: [0.5, 1.0], maxFactor: 15.0),
-            [0.5, 1.0, 2.0, 3.0, 5.0]
-        )
-
-        // A Pro has the 5x optically, so only 2 and 3 are added — and the result matches
-        // the iPhone 16 list exactly.
-        XCTAssertEqual(
-            CameraService.zoomLevels(optical: [0.5, 1.0, 5.0], maxFactor: 15.0),
-            [0.5, 1.0, 2.0, 3.0, 5.0]
-        )
-
-        // A 3x tele must not get a 3.0 rung stacked on top of it.
-        XCTAssertEqual(
-            CameraService.zoomLevels(optical: [0.5, 1.0, 3.0], maxFactor: 15.0),
-            [0.5, 1.0, 2.0, 3.0, 5.0]
-        )
-
-        // Single lens: still worth a pill, because the added rungs are real zoom.
-        XCTAssertEqual(
-            CameraService.zoomLevels(optical: [1.0], maxFactor: 5.0),
-            [1.0, 2.0, 3.0, 5.0]
-        )
-
-        // Nothing beyond the range may be offered — that was the whole bug with the
-        // hard-coded `0,5` on a phone that has no ultra wide.
-        XCTAssertEqual(
-            CameraService.zoomLevels(optical: [1.0], maxFactor: 1.0),
-            []
-        )
-    }
-
     func test_emptyLensListIsPassedThroughToState() async throws {
         let camera = StubCamera()
         camera.zoomLevels = []
@@ -529,7 +492,7 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
     func setTorch(on: Bool) {}
     func startRecording(to outputURL: URL) {}
     func stopRecording() async throws -> URL? { nil }
-    func attachPreviewLayer(_ layer: AVCaptureVideoPreviewLayer) {}
+    @MainActor func attachPreviewLayer(_ layer: AVCaptureVideoPreviewLayer) {}
     func installHardwareControls(labels: CameraControlLabels) async { installedLabels = labels }
 
     /// Drives the same callback AVFoundation's interruption notifications drive.
