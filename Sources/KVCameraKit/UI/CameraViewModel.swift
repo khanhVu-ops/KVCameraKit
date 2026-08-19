@@ -39,7 +39,7 @@ enum CaptureStage: Equatable, Sendable {
 
 struct CameraState: Equatable, Sendable {
     var authorization: CameraAuthorization = .checking
-    var isPhotoMode: Bool = true
+    var mode: CameraMode = .photo
     var isRecording: Bool = false
     var recordingDurationSeconds: Int = 0
     var flashMode: CameraFlashMode = .auto
@@ -57,7 +57,7 @@ struct CameraState: Equatable, Sendable {
     var timerDelaySeconds: Int = 0
     /// The delay menu is open. State, not a `@State` flag in the view: closing it happens
     /// in the same update as choosing a delay, and a local flag written next to a
-    /// `@Published` mutation in one button action did not survive the re-render.
+    /// state mutation in one button action did not survive the re-render.
     var isTimerMenuOpen: Bool = false
     var timerCountdown: Int = 0
     var focusTapPoint: CGPoint?
@@ -99,13 +99,14 @@ struct CameraState: Equatable, Sendable {
 }
 
 @MainActor
-final class CameraViewModel: ObservableObject {
+@Observable
+final class CameraViewModel {
     typealias State = CameraState
 
     enum Action {
         case onAppear
         case onDisappear
-        case setPhotoMode(Bool)
+        case setMode(CameraMode)
         case toggleFlash
         case toggleTorch
         case toggleGrid
@@ -127,20 +128,24 @@ final class CameraViewModel: ObservableObject {
         case dismiss
     }
 
-    @Published private(set) var state = CameraState()
+    private(set) var state = CameraState()
 
-    let cameraService: any CameraCapturing
+    /// `@ObservationIgnored` on every dependency below, and it is not a formality: without
+    /// it the macro synthesises tracking for `let`s that can never change, so a view reading
+    /// `cameraService.session` registers a dependency on a constant and pays for it on every
+    /// access.
+    @ObservationIgnored let cameraService: any CameraCapturing
 
     /// Everything the camera used to know about storage now lives behind this.
-    private let handler: any CameraArtifactHandler
+    @ObservationIgnored private let handler: any CameraArtifactHandler
     /// Dismissal is the host's: a package that owns a router cannot be dropped into a
     /// project that routes differently. Opening the library is the *view's* business and
     /// does not pass through here at all — same reason the repo keeps `pushView` out of
     /// ViewModels.
-    private let onDismiss: () -> Void
+    @ObservationIgnored private let onDismiss: () -> Void
 
-    private var recordingTask: Task<Void, Never>?
-    private var countdownTask: Task<Void, Never>?
+    @ObservationIgnored private var recordingTask: Task<Void, Never>?
+    @ObservationIgnored private var countdownTask: Task<Void, Never>?
 
     init(
         handler: any CameraArtifactHandler,
@@ -202,16 +207,16 @@ final class CameraViewModel: ObservableObject {
                 cameraService.stopSession()
             }
 
-        case .setPhotoMode(let isPhoto):
-            guard !state.isRecording, isPhoto != state.isPhotoMode else { return }
-            state.isPhotoMode = isPhoto
-            if !isPhoto {
+        case .setMode(let mode):
+            guard !state.isRecording, mode != state.mode else { return }
+            state.mode = mode
+            if mode.isContinuousCapture {
                 state.isTorchOn = false
             }
             // The microphone is attached here and nowhere else. Adding it at setup put the
             // orange in-use indicator on screen and stopped the user's music, on a screen
             // that may only ever take a photo.
-            Task { await cameraService.setAudioEnabled(!isPhoto) }
+            Task { await cameraService.setAudioEnabled(mode.needsAudio) }
             CameraHaptic.selection.play()
 
         case .toggleFlash:
@@ -340,14 +345,16 @@ final class CameraViewModel: ObservableObject {
     // MARK: - Capture
 
     private func handleShutterTap() {
-        if state.isPhotoMode {
+        switch state.mode {
+        case .photo:
             guard !state.isCaptureBusy else { return }
             if state.timerDelaySeconds > 0 {
                 startCountdownThenCapture()
             } else {
                 capturePhoto()
             }
-        } else {
+
+        case .video:
             if state.isRecording {
                 stopVideoRecording()
             } else {

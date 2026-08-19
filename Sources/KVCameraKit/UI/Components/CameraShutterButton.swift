@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Custom animated shutter button with high-end mechanical feel and recording pulse animation.
 struct CameraShutterButton: View {
-    let isPhotoMode: Bool
+    let mode: CameraMode
     let isRecording: Bool
     /// A frame is in the pipeline. The inner disc closes like an iris and reopens when
     /// the capture leaves the sensor, which is the only mechanical cue the button gives
@@ -18,7 +18,7 @@ struct CameraShutterButton: View {
         } label: {
             ZStack {
                 // Outer Pulsing Wave for Video Recording
-                if !isPhotoMode && isRecording {
+                if mode.isContinuousCapture && isRecording {
                     Circle()
                         .stroke(Color.red.opacity(0.4), lineWidth: 6)
                         .frame(width: 86, height: 86)
@@ -38,7 +38,7 @@ struct CameraShutterButton: View {
                     .frame(width: 78, height: 78)
                     .shadow(color: Color.black.opacity(0.3), radius: 4, x: 0, y: 2)
 
-                if isPhotoMode {
+                if !mode.isContinuousCapture {
                     // Photo mode: Solid white circle with inner ring gap
                     Circle()
                         .fill(Color.white)
@@ -62,7 +62,7 @@ struct CameraShutterButton: View {
                 }
             }
             .animation(.spring(response: 0.35, dampingFraction: 0.72), value: isRecording)
-            .animation(.easeInOut(duration: 0.22), value: isPhotoMode)
+            .animation(.easeInOut(duration: 0.22), value: mode)
         }
         .buttonStyle(ShutterButtonStyle())
     }
@@ -79,7 +79,7 @@ private struct ShutterButtonStyle: ButtonStyle {
 #Preview("Shutter Button - Photo") {
     ZStack {
         Color.black
-        CameraShutterButton(isPhotoMode: true, isRecording: false, isExposing: false, action: {})
+        CameraShutterButton(mode: .photo, isRecording: false, isExposing: false, action: {})
     }
     .frame(width: 200, height: 200)
 }
@@ -87,7 +87,7 @@ private struct ShutterButtonStyle: ButtonStyle {
 #Preview("Shutter Button - Exposing") {
     ZStack {
         Color.black
-        CameraShutterButton(isPhotoMode: true, isRecording: false, isExposing: true, action: {})
+        CameraShutterButton(mode: .photo, isRecording: false, isExposing: true, action: {})
     }
     .frame(width: 200, height: 200)
 }
@@ -95,7 +95,7 @@ private struct ShutterButtonStyle: ButtonStyle {
 #Preview("Shutter Button - Video Recording") {
     ZStack {
         Color.black
-        CameraShutterButton(isPhotoMode: false, isRecording: true, isExposing: false, action: {})
+        CameraShutterButton(mode: .video, isRecording: true, isExposing: false, action: {})
     }
     .frame(width: 200, height: 200)
 }

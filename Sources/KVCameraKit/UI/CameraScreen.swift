@@ -9,7 +9,7 @@ import AVKit
 /// The host supplies three things and gets a screen: somewhere to put the bytes, the
 /// Camera Control HUD titles, and what "close" means.
 public struct CameraScreen: View {
-    @StateObject private var viewModel: CameraViewModel
+    @State private var viewModel: CameraViewModel
     private let controlTitles: CameraControlTitles
 
     @Environment(\.locale) private var locale
@@ -24,7 +24,7 @@ public struct CameraScreen: View {
     ) {
         self.controlTitles = controlTitles
         self.onOpenLibrary = onOpenLibrary
-        _viewModel = StateObject(
+        _viewModel = State(
             wrappedValue: CameraViewModel(handler: handler, onDismiss: onDismiss)
         )
     }
@@ -35,7 +35,7 @@ public struct CameraScreen: View {
             cameraService: viewModel.cameraService,
             onAppear: { viewModel.send(.onAppear) },
             onDisappear: { viewModel.send(.onDisappear) },
-            onSetPhotoMode: { viewModel.send(.setPhotoMode($0)) },
+            onSetMode: { viewModel.send(.setMode($0)) },
             onToggleFlash: { viewModel.send(.toggleFlash) },
             onToggleTorch: { viewModel.send(.toggleTorch) },
             onToggleGrid: { viewModel.send(.toggleGrid) },
@@ -98,7 +98,7 @@ struct CameraContentView: View {
     let cameraService: any CameraCapturing
     let onAppear: () -> Void
     let onDisappear: () -> Void
-    let onSetPhotoMode: (Bool) -> Void
+    let onSetMode: (CameraMode) -> Void
     let onToggleFlash: () -> Void
     let onToggleTorch: () -> Void
     let onToggleGrid: () -> Void
@@ -300,7 +300,7 @@ struct CameraContentView: View {
                         guard abs(value.translation.width) > 60,
                               abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
                         withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
-                            onSetPhotoMode(value.translation.width < 0)
+                            onSetMode(state.mode.stepped(by: value.translation.width < 0 ? 1 : -1))
                         }
                     }
             )
@@ -422,7 +422,7 @@ struct CameraContentView: View {
             }
 
             // Torch Toggle (in Video Mode)
-            if !state.isPhotoMode {
+            if state.mode.isContinuousCapture {
                 Button {
                     onToggleTorch()
                 } label: {
@@ -461,7 +461,7 @@ struct CameraContentView: View {
                     .background(glassCircleBackground)
             }
         }
-        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: state.isPhotoMode)
+        .animation(.spring(response: 0.35, dampingFraction: 0.75), value: state.mode)
     }
 
     /// Tap to open, tap an option to choose.
@@ -623,7 +623,7 @@ struct CameraContentView: View {
             .padding(.bottom, 2)
 
             // 2. Mode Switcher (PHOTO / VIDEO) or Recording Stopwatch
-            if !state.isPhotoMode && state.isRecording {
+            if state.mode.isContinuousCapture && state.isRecording {
                 recordingStopwatch
                     .padding(.vertical, 4)
             } else {
@@ -649,7 +649,7 @@ struct CameraContentView: View {
                 Spacer()
 
                 CameraShutterButton(
-                    isPhotoMode: state.isPhotoMode,
+                    mode: state.mode,
                     isRecording: state.isRecording,
                     isExposing: state.captureStage == .exposing,
                     action: onShutterTap
@@ -710,11 +710,14 @@ struct CameraContentView: View {
     /// Modern Apple Camera Mode Switcher with Liquid Glass styling & Spring Transition
     private var systemModeSwitcher: some View {
         HStack(spacing: 2) {
-            // `.cameraKit`, not a bare literal: a `LocalizedStringResource` literal resolves
-            // against `Bundle.main`, which is the host app, so these two would read `VIDEO`
+            // Built from `allCases`, so a third mode appears here by existing rather than by
+            // someone remembering to add a row. The titles come off the enum, and they use
+            // `.cameraKit` rather than a bare literal because a `LocalizedStringResource`
+            // literal resolves against `Bundle.main` — the host app — and would read `VIDEO`
             // and `PHOTO` in every language outside this project.
-            modeOption(title: .cameraKit("VIDEO"), isActive: !state.isPhotoMode) { onSetPhotoMode(false) }
-            modeOption(title: .cameraKit("PHOTO"), isActive: state.isPhotoMode) { onSetPhotoMode(true) }
+            ForEach(CameraMode.allCases, id: \.self) { mode in
+                modeOption(title: mode.title, isActive: state.mode == mode) { onSetMode(mode) }
+            }
         }
         .padding(3)
         .background {
@@ -905,7 +908,7 @@ struct CameraContentView: View {
         cameraService: CameraService(),
         onAppear: {},
         onDisappear: {},
-        onSetPhotoMode: { _ in },
+        onSetMode: { _ in },
         onToggleFlash: {},
         onToggleTorch: {},
         onToggleGrid: {},
@@ -931,7 +934,7 @@ struct CameraContentView: View {
         cameraService: CameraService(),
         onAppear: {},
         onDisappear: {},
-        onSetPhotoMode: { _ in },
+        onSetMode: { _ in },
         onToggleFlash: {},
         onToggleTorch: {},
         onToggleGrid: {},

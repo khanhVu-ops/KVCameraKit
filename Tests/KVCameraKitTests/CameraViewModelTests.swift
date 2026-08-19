@@ -11,9 +11,9 @@ final class CameraViewModelTests: XCTestCase {
         let handler = StubHandler()
         let viewModel = makeViewModel(camera: camera, handler: handler)
 
-        XCTAssertTrue(viewModel.state.isPhotoMode)
-        viewModel.send(.setPhotoMode(false))
-        XCTAssertFalse(viewModel.state.isPhotoMode)
+        XCTAssertEqual(viewModel.state.mode, .photo)
+        viewModel.send(.setMode(.video))
+        XCTAssertEqual(viewModel.state.mode, .video)
 
         XCTAssertEqual(viewModel.state.flashMode, .auto)
         viewModel.send(.toggleFlash)
@@ -231,10 +231,10 @@ final class CameraViewModelTests: XCTestCase {
         // screen and stops whatever the user was listening to.
         XCTAssertFalse(camera.isAudioEnabled)
 
-        viewModel.send(.setPhotoMode(false))
+        viewModel.send(.setMode(.video))
         try await waitUntil { camera.isAudioEnabled }
 
-        viewModel.send(.setPhotoMode(true))
+        viewModel.send(.setMode(.photo))
         try await waitUntil { !camera.isAudioEnabled }
     }
 
