@@ -15,15 +15,19 @@ public struct CameraScreen: View {
     @Environment(\.locale) private var locale
 
     private let onOpenLibrary: CameraLibraryOpener?
+    /// Defaults to `.system` — see `CameraPreviewEngine` for why the new path ships off.
+    private let previewEngine: CameraPreviewEngine
 
     public init(
         handler: any CameraArtifactHandler,
         controlTitles: CameraControlTitles,
         onDismiss: @escaping () -> Void,
-        onOpenLibrary: CameraLibraryOpener? = nil
+        onOpenLibrary: CameraLibraryOpener? = nil,
+        previewEngine: CameraPreviewEngine = .system
     ) {
         self.controlTitles = controlTitles
         self.onOpenLibrary = onOpenLibrary
+        self.previewEngine = previewEngine
         _viewModel = State(
             wrappedValue: CameraViewModel(handler: handler, onDismiss: onDismiss)
         )
@@ -33,6 +37,7 @@ public struct CameraScreen: View {
         CameraContentView(
             state: viewModel.state,
             cameraService: viewModel.cameraService,
+            previewEngine: previewEngine,
             onAppear: { viewModel.send(.onAppear) },
             onDisappear: { viewModel.send(.onDisappear) },
             onSetMode: { viewModel.send(.setMode($0)) },
@@ -96,6 +101,7 @@ private extension CameraScreen {
 struct CameraContentView: View {
     let state: CameraState
     let cameraService: any CameraCapturing
+    let previewEngine: CameraPreviewEngine
     let onAppear: () -> Void
     let onDisappear: () -> Void
     let onSetMode: (CameraMode) -> Void
@@ -148,16 +154,35 @@ struct CameraContentView: View {
                 // cutting straight to a live layer showed a black frame first.
                 ZStack {
                     if state.isAuthorized {
-                        CameraPreviewView(
-                            session: cameraService.session,
-                            onLayerReady: { cameraService.attachPreviewLayer($0) },
-                            onTapToFocus: { devicePoint, viewPoint, locked in
-                                localFocusPoint = viewPoint
-                                onTapToFocus(devicePoint, viewPoint, locked)
-                            }
-                        )
-                        .ignoresSafeArea()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        // The whole of the flag, in one `switch`. Everything around it —
+                        // focus reticle, grid, zoom, the capture flight — is identical either
+                        // way, which is the property that makes reverting a one-line change
+                        // rather than an unpicking.
+                        switch previewEngine {
+                        case .system:
+                            CameraPreviewView(
+                                session: cameraService.session,
+                                onLayerReady: { cameraService.attachPreviewLayer($0) },
+                                onTapToFocus: { devicePoint, viewPoint, locked in
+                                    localFocusPoint = viewPoint
+                                    onTapToFocus(devicePoint, viewPoint, locked)
+                                }
+                            )
+                            .ignoresSafeArea()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                        case .metal:
+                            MetalCameraPreviewView(
+                                frames: cameraService.frames,
+                                isMirrored: state.isUsingFrontCamera,
+                                onTapToFocus: { devicePoint, viewPoint, locked in
+                                    localFocusPoint = viewPoint
+                                    onTapToFocus(devicePoint, viewPoint, locked)
+                                }
+                            )
+                            .ignoresSafeArea()
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
 
                         // Full-screen 3x3 Grid Overlay
                         if state.isGridEnabled {
@@ -934,6 +959,9 @@ struct CameraContentView: View {
     CameraContentView(
         state: CameraState(authorization: .authorized),
         cameraService: CameraService(),
+        // `.system` in both previews: a canvas has no session and no frame stream, so the
+        // Metal path would render a correct black rectangle and prove nothing.
+        previewEngine: .system,
         onAppear: {},
         onDisappear: {},
         onSetMode: { _ in },
@@ -960,6 +988,9 @@ struct CameraContentView: View {
     CameraContentView(
         state: CameraState(authorization: .denied),
         cameraService: CameraService(),
+        // `.system` in both previews: a canvas has no session and no frame stream, so the
+        // Metal path would render a correct black rectangle and prove nothing.
+        previewEngine: .system,
         onAppear: {},
         onDisappear: {},
         onSetMode: { _ in },

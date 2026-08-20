@@ -88,6 +88,14 @@ protocol CameraCapturing: AnyObject, Sendable {
     var session: AVCaptureSession { get }
     var flashMode: CameraFlashMode { get set }
 
+    /// Whether the front camera is the active one.
+    ///
+    /// New with the Metal preview, and only needed by it: `AVCaptureVideoPreviewLayer`
+    /// mirrors the front camera itself, so nothing above this ever had to know. Drawing the
+    /// frames ourselves means doing it ourselves — and a selfie preview that is not mirrored
+    /// is instantly, viscerally wrong in a way users report as "the camera is backwards".
+    var isUsingFrontCamera: Bool { get }
+
     /// Fires with `false` when the session stops delivering frames — a phone call,
     /// another app taking the camera, Split View — and `true` when it resumes. Without
     /// it the viewfinder simply freezes black and nothing on screen says why.

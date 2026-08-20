@@ -325,6 +325,8 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         rotation.refresh(for: activeDevice)
     }
 
+    var isUsingFrontCamera: Bool { currentPosition == .front }
+
     var frames: any FrameSource { frameTap }
 
     private func applyCaptureRotation(_ angle: CGFloat) {

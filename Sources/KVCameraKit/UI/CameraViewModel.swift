@@ -64,6 +64,9 @@ struct CameraState: Equatable, Sendable {
     /// A long press pinned focus and exposure. Shown as a badge, because a camera that
     /// has silently stopped metering is the kind of thing a user discovers in the photo.
     var isFocusLocked: Bool = false
+    /// Which camera is live. Only the Metal preview needs it — to mirror — but it belongs in
+    /// state rather than being read off the service in a view, like everything else here.
+    var isUsingFrontCamera: Bool = false
     /// The lens is being swapped. Held in state so the viewfinder transition covers the
     /// real reconfiguration rather than a guessed delay.
     var isSwitchingCamera: Bool = false
@@ -175,6 +178,7 @@ final class CameraViewModel {
                 state.authorization = authorized ? .authorized : .denied
                 if authorized {
                     refreshZoomCapabilities()
+                    state.isUsingFrontCamera = cameraService.isUsingFrontCamera
                 }
             }
             cameraService.onHardwareControlChange = { [weak self] change in
@@ -302,6 +306,7 @@ final class CameraViewModel {
                 // The front camera has a different set of lenses; re-reading is the only
                 // way the pill stops advertising the back camera's.
                 refreshZoomCapabilities()
+                state.isUsingFrontCamera = cameraService.isUsingFrontCamera
                 state.isSwitchingCamera = false
             }
 

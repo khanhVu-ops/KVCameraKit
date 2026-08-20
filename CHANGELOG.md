@@ -6,6 +6,56 @@ All notable changes to KVCameraKit are documented in this file.
 
 Nothing yet.
 
+## 1.2.0 - 2026-08-20
+
+### Added
+
+- **A Metal viewfinder, behind a flag.** `CameraPreviewEngine` selects between
+  `AVCaptureVideoPreviewLayer` (`.system`, the default) and an `MTKView` fed from
+  `FrameSource` (`.metal`). Pass it to `CameraScreen(previewEngine:)`.
+
+  The reason is not speed. `AVCaptureVideoPreviewLayer` renders the session straight into a
+  `CALayer` and nothing can be placed in front of it — no LUT, no tone curve, no beauty
+  pass. Live filtering is impossible until the app draws its own frames, so owning the
+  preview is the precondition for that work rather than an optimisation of this screen.
+
+  It ships **off**, and that is the point of the flag. A viewfinder is the one part of a
+  camera a user cannot work around when it is wrong: dropped frames, shifted colour, changed
+  framing or a laggy shutter are not things you route around, and reverting has to be one
+  line rather than a hotfix. It also costs a real `AVCaptureVideoDataOutput` on the session,
+  which on some devices lowers maximum photo dimensions or disables zero-shutter-lag — a
+  trade worth measuring against the other engine on the same device, minutes apart.
+
+  Both pixel formats are handled rather than one being forced. `CameraFrameTap` deliberately
+  sets no `videoSettings`, so a device delivers bi-planar YCbCr — the sensor's own format at
+  1.5 bytes per pixel — while the simulated source produces BGRA. Requesting BGRA from
+  AVFoundation would be a conversion of every frame bought before knowing anything needs it,
+  and would leave the simulator exercising a path no device takes. The YCbCr shader carries
+  both the full-range and video-range matrices, because using the wrong one looks *almost*
+  right — slightly washed out or slightly crushed — which is how it ships.
+
+  Rotation, aspect fill and front-camera mirroring compose into one transform, so there is a
+  single place they can disagree instead of three. Aspect **fill**, matching what the system
+  layer was doing: switching engines must not change how much of the scene is visible, or
+  the framing someone composed a shot with moves under them.
+
+- `CameraCapturing.isUsingFrontCamera`, and `CameraState.isUsingFrontCamera` beside it.
+  Needed only by the Metal path: `AVCaptureVideoPreviewLayer` mirrors the front camera
+  itself, so nothing above this ever had to know. An unmirrored selfie preview is reported by
+  users as "the camera is backwards".
+
+### Notes
+
+Two things this release cannot verify on a simulator, both of which want a device:
+
+The preview currently rotates by the horizon-level **capture** angle, which is what the
+frame tap is told. On a portrait-locked screen that is the same as the preview angle; if they
+diverge under device rotation, the tap should report the preview angle as well.
+
+And the cost. 30 fps with zero drops and working capture is what a simulator can show; what
+a video data output does to thermals, battery, photo dimensions and zero-shutter-lag on real
+hardware is exactly the measurement the flag exists to make possible.
+
 ## 1.1.0 - 2026-08-20
 
 ### Added

@@ -462,6 +462,7 @@ private final class StubHandler: CameraArtifactHandler, @unchecked Sendable {
 private final class StubCamera: CameraCapturing, @unchecked Sendable {
     let session = AVCaptureSession()
     var flashMode: CameraFlashMode = .auto
+    var isUsingFrontCamera = false
     var onAvailabilityChange: (@Sendable (Bool) -> Void)?
     var onHardwareControlChange: (@Sendable (CameraHardwareControlChange) -> Void)?
 
@@ -486,7 +487,10 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
 
     func setupSession() async -> Bool { setupResult }
     func stopSession() { didStopSession = true }
-    func switchCamera() async { switchCount += 1 }
+    func switchCamera() async {
+        switchCount += 1
+        isUsingFrontCamera.toggle()
+    }
     func setAudioEnabled(_ enabled: Bool) async { isAudioEnabled = enabled }
     func availableZoomLevels() -> [CGFloat] { zoomLevels }
     func zoomRange() -> ClosedRange<CGFloat> { range }
