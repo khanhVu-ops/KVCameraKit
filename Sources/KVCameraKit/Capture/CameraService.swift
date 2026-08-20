@@ -25,8 +25,39 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     var flashMode: CameraFlashMode = .auto
     private(set) var isTorchOn: Bool = false
 
+    var censorMode: CameraCensorMode = .off {
+        didSet {
+            guard censorMode != oldValue else { return }
+            updateCensorSubscription()
+        }
+    }
+
+    /// Whether the censor can actually be honoured, which is a question about the two engines
+    /// rather than about the user's choice.
+    ///
+    /// The censor is a live pixel effect, so it needs the app to own its pixels: with
+    /// `AVCaptureVideoPreviewLayer` the session renders straight into a `CALayer` and nothing
+    /// can be put in front of it, and with `AVCaptureMovieFileOutput` the app never sees a frame
+    /// of the recording. The first implementation answered this by drawing a SwiftUI overlay on
+    /// top of the preview, which is the one answer that is worse than refusing: it looks
+    /// censored and records uncensored.
+    ///
+    /// Both engines are canaries that ship off (`CameraPreviewEngine`, `CameraRecordingEngine`),
+    /// so this is `false` in release and `true` in debug today — and it becomes true in release
+    /// by promoting those two, which is the ladder they already exist for.
+    var isCensorSupported: Bool {
+        previewEngine.needsFrames && recordingEngine.usesSampleBuffers
+    }
+
+    /// The live face geometry, in sensor-buffer space. Read once per drawn frame by the
+    /// viewfinder and once per frame by the recorder.
+    var censorRegions: [CensorRegion] {
+        censorTracker.regions
+    }
+
     var onAvailabilityChange: (@Sendable (Bool) -> Void)?
     var onHardwareControlChange: (@Sendable (CameraHardwareControlChange) -> Void)?
+    var onHorizonMotion: (@Sendable (Double, Bool) -> Void)?
 
     /// Whether *we* started the session.
     ///
@@ -58,6 +89,9 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     private let assetWriter = AssetWriterRecorder()
     /// Held for the duration of a recording, so the frame tap keeps delivering.
     private var recordingSubscription: FrameSubscription?
+    private var censorSubscription: FrameSubscription?
+    private let censorTracker = CensorTracker()
+    private let motionObserver = CameraMotionObserver()
     /// Only for a streamed recording: carries segments to the host's sink in order, and
     /// reports at stop whether any of them failed to land.
     private var streamPump: CaptureStreamPump?
@@ -76,6 +110,10 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         self.recordingEngine = recordingEngine
         self.previewEngine = previewEngine
         super.init()
+
+        motionObserver.onMotionUpdate = { [weak self] angle, isLevel in
+            self?.onHorizonMotion?(angle, isLevel)
+        }
 
         // Built here rather than at the property, because each needs a callback into
         // `self`. The alternative — every subsystem holding `weak var service` — is the
@@ -127,6 +165,42 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
         let defaultDevice = CameraDeviceDiscovery.device(for: .back)
         refreshZoomCache(for: defaultDevice)
+    }
+
+    func startMotionObserver() {
+        motionObserver.start()
+    }
+
+    func stopMotionObserver() {
+        motionObserver.stop()
+    }
+
+    /// Subscribes the tracker to the frame stream while a censor mode is selected, and nothing
+    /// otherwise.
+    ///
+    /// Nothing is pushed anywhere from here. The tracker publishes its geometry and both
+    /// consumers — the viewfinder's draw and the recorder's append — pull the newest value when
+    /// they need it. The first implementation pushed `[CGRect]` through a callback into
+    /// `CameraState`, which put a Vision result into a SwiftUI state update at 30 Hz and still
+    /// managed to be *stale* by the time it was drawn.
+    private func updateCensorSubscription() {
+        // Gated on the engines as well as on the mode, and not only to be tidy. Subscribing
+        // attaches the video data output, and on a session that is already running that is a
+        // pipeline rebuild AVFoundation takes *seconds* over — with every shutter tap and zoom
+        // queued behind it on this queue. See `CameraFrameTap.pin(to:)`, which exists because
+        // that shipped once. Where the censor cannot be honoured anyway, paying for it would be
+        // the same bug for no feature at all.
+        censorTracker.isEnabled = censorMode.isEnabled && isCensorSupported
+
+        guard censorTracker.isEnabled else {
+            censorSubscription?.cancel()
+            censorSubscription = nil
+            return
+        }
+        guard censorSubscription == nil else { return }
+        censorSubscription = frameTap.addConsumer { [weak self] frame in
+            self?.censorTracker.accept(frame)
+        }
     }
 
     private var hardwareControlLabels: CameraControlLabels?
@@ -568,14 +642,26 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         onAvailabilityChange?(isAvailable)
     }
 
-    // MARK: - Capture
-
     func capturePhoto() async throws -> CapturedPhoto? {
         #if targetEnvironment(simulator)
-        return SimulatedCapture.photo()
+        let raw = SimulatedCapture.photo()
         #else
-        return try await photo.capture(flashMode: flashMode, on: sessionQueue)
+        let raw = try await photo.capture(flashMode: flashMode, on: sessionQueue)
         #endif
+
+        guard censorMode.isEnabled, isCensorSupported, let rawPhoto = raw else {
+            return raw
+        }
+
+        if let censored = CensorRenderer.apply(censorMode, to: rawPhoto.data) {
+            let censoredPreview = rawPhoto.preview.flatMap { CensorRenderer.apply(censorMode, to: $0)?.data }
+            return CapturedPhoto(
+                data: censored.data,
+                preview: censoredPreview,
+                fileExtension: censored.fileExtension
+            )
+        }
+        return raw
     }
 
     func startRecording(to destination: RecordingDestination) {
@@ -598,6 +684,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             // The rotation is baked in as a track transform rather than by rotating pixels:
             // one matrix in the container header instead of a full-frame copy 30 times a
             // second, and every player honours it.
+            installCensorStage()
             assetWriter.start(
                 to: outputURL,
                 rotationDegrees: latestCaptureAngle,
@@ -611,6 +698,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             // has to drain it before anything can be committed.
             let pump = CaptureStreamPump(sink: sink)
             streamPump = pump
+            installCensorStage()
             assetWriter.startStreaming(
                 rotationDegrees: latestCaptureAngle,
                 includesAudio: isAudioTapAttached,
@@ -625,6 +713,30 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             // than writing a plaintext file the host never asked for.
             break
         }
+    }
+
+    /// Hands the recorder the censor, before the first frame reaches it.
+    ///
+    /// Installed per recording rather than once, because the mode can change between two
+    /// recordings and a stage carrying the previous one would censor the wrong way — or, having
+    /// been switched off, not at all, which is the failure that matters.
+    ///
+    /// The stage subscribes to the *tracker*, not to a snapshot: a recording that started with
+    /// nobody in frame has to censor the face that walks into it.
+    private func installCensorStage() {
+        guard censorMode.isEnabled, isCensorSupported else {
+            assetWriter.videoStage = nil
+            return
+        }
+        let stage = CensorVideoStage()
+        stage.mode = censorMode
+        stage.regions = { [weak self] in self?.censorTracker.regions ?? [] }
+        assetWriter.videoStage = stage
+
+        // The tracker is normally subscribed by the mode picker, but a recording must not
+        // depend on that having happened — and it also must not be the thing that unsubscribes
+        // it, hence a plain call to the same idempotent function.
+        updateCensorSubscription()
     }
 
     /// The video and audio taps a writer needs, attached together because they are two halves

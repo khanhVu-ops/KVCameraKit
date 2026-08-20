@@ -59,6 +59,26 @@ struct CameraState: Equatable, Sendable {
     /// The filter strip is open. State rather than a `@State` flag in the view, for the same
     /// reason the timer menu is: picking a filter closes it in the same update.
     var isFilterPickerOpen: Bool = false
+    /// Privacy face censoring mode (Off / Mosaic / Blur / Censor Bar).
+    var censorMode: CameraCensorMode = .off
+    /// Whether the censor mode picker shelf is open.
+    var isCensorPickerOpen: Bool = false
+    /// Whether this build can censor at all — a fact about the preview and recording engines,
+    /// read once on appear. See `CameraService.isCensorSupported`.
+    ///
+    /// No `detectedFaces` beside it, deliberately. The geometry used to live here, pushed in
+    /// from a Vision callback so a SwiftUI overlay could draw it, and that was the wrong shape
+    /// twice over: it put a 30 Hz stream of `[CGRect]` through a main-actor state update, and
+    /// the overlay it fed could not touch the camera's pixels, so the preview and the recorded
+    /// file disagreed. The censor is now a stage in the pixel pipeline and the geometry never
+    /// enters `CameraState`.
+    var isCensorSupported: Bool = false
+    /// Whether the horizon level indicator is active.
+    var isHorizonLevelEnabled: Bool = true
+    /// Current tilt angle of the device relative to horizon (in degrees).
+    var horizonAngle: Double = 0.0
+    /// Whether the device is currently level (within ±0.75°).
+    var isHorizonLevel: Bool = false
     var timerDelaySeconds: Int = 0
     /// The delay menu is open. State, not a `@State` flag in the view: closing it happens
     /// in the same update as choosing a delay, and a local flag written next to a
@@ -123,6 +143,9 @@ final class CameraViewModel {
         case setZoom(CGFloat, animated: Bool)
         case toggleFilterPicker
         case setFilter(CameraFilter)
+        case toggleCensorPicker
+        case setCensorMode(CameraCensorMode)
+        case toggleHorizonLevel
         case focusAt(devicePoint: CGPoint, viewPoint: CGPoint, locked: Bool)
         case clearFocusLock
         case setExposureBias(Float)
@@ -190,6 +213,10 @@ final class CameraViewModel {
             previewEngine: previewEngine
         )
         self.cameraService = service
+        // Read at construction rather than on appear, because it is a fact about how the
+        // service was configured and cannot change while the screen is alive. Read on appear,
+        // the censor control would be missing from the first render of every launch.
+        self.state.isCensorSupported = service.isCensorSupported
         refreshZoomCapabilities()
     }
 
@@ -201,6 +228,13 @@ final class CameraViewModel {
                     self?.state.isSessionInterrupted = !isAvailable
                 }
             }
+            cameraService.onHorizonMotion = { [weak self] angle, isLevel in
+                Task { @MainActor in
+                    self?.state.horizonAngle = angle
+                    self?.state.isHorizonLevel = isLevel
+                }
+            }
+            cameraService.startMotionObserver()
             Task {
                 let authorized = await cameraService.setupSession()
                 state.authorization = authorized ? .authorized : .denied
@@ -224,6 +258,7 @@ final class CameraViewModel {
 
         case .onDisappear:
             stopCountdown()
+            cameraService.stopMotionObserver()
             // A recording in flight is *finished*, not abandoned. It used to be dropped, which
             // silently lost the clip; with a streaming destination it would also leave the
             // host holding a half-written item nobody ever completes. The session is stopped
@@ -317,12 +352,38 @@ final class CameraViewModel {
 
         case .toggleFilterPicker:
             state.isFilterPickerOpen.toggle()
+            if state.isFilterPickerOpen {
+                state.isCensorPickerOpen = false
+            }
             CameraHaptic.selection.play()
 
         case .setFilter(let filter):
             guard state.mode.supportsFilters else { return }
             state.filter = filter
             state.isFilterPickerOpen = false
+            CameraHaptic.selection.play()
+
+        case .toggleCensorPicker:
+            guard state.isCensorSupported else { return }
+            state.isCensorPickerOpen.toggle()
+            if state.isCensorPickerOpen {
+                state.isFilterPickerOpen = false
+                state.isTimerMenuOpen = false
+            }
+            CameraHaptic.selection.play()
+
+        case .setCensorMode(let mode):
+            // Refused rather than accepted-and-ignored. A censor mode this build cannot honour
+            // is not a degraded feature, it is a screen telling the user their face is covered
+            // while it records it.
+            guard state.isCensorSupported else { return }
+            state.censorMode = mode
+            cameraService.censorMode = mode
+            state.isCensorPickerOpen = false
+            CameraHaptic.selection.play()
+
+        case .toggleHorizonLevel:
+            state.isHorizonLevelEnabled.toggle()
             CameraHaptic.selection.play()
 
         case .setZoom(let factor, let animated):

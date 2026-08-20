@@ -18,6 +18,17 @@ struct MetalCameraPreviewView: UIViewRepresentable {
     /// renderer that draws — the still path gets the same matrix, so the photo and the
     /// viewfinder cannot disagree.
     let tone: CameraTone
+    /// The censor look. The geometry it applies to arrives separately, and for a different
+    /// reason — see `censorRegions`.
+    let censorMode: CameraCensorMode
+    /// The live face geometry, read once per drawn frame.
+    ///
+    /// A closure rather than a value, because a value here would be wrong most of the time.
+    /// `updateUIView` runs when SwiftUI re-renders this view, which happens when something in
+    /// `CameraState` changes — and the geometry deliberately does not live there. Pulled from
+    /// the renderer's `draw`, the censor is always on the newest detection; pushed, it would sit
+    /// wherever the faces were the last time an unrelated control was tapped.
+    let censorRegions: @Sendable () -> [CensorRegion]
     /// `(devicePoint, viewPoint, isLocked)`, matching the system preview's contract.
     let onTapToFocus: (CGPoint, CGPoint, Bool) -> Void
 
@@ -58,6 +69,8 @@ struct MetalCameraPreviewView: UIViewRepresentable {
     func updateUIView(_ uiView: MTKView, context: Context) {
         context.coordinator.renderer?.isMirrored = isMirrored
         context.coordinator.renderer?.toneMatrix = tone.colorMatrix
+        context.coordinator.renderer?.censorMode = censorMode
+        context.coordinator.renderer?.censorRegions = censorRegions
         context.coordinator.onTapToFocus = onTapToFocus
     }
 

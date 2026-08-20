@@ -94,6 +94,73 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     /// destinations, no second implementation to drift.
     var toneMatrix: simd_float4x4 = matrix_identity_float4x4
 
+    /// The censor look, set from the screen when the user picks one.
+    var censorMode: CameraCensorMode = .off
+
+    /// Where the face geometry comes from, asked **once per drawn frame**.
+    ///
+    /// A closure rather than a stored array, and that is not a style choice. The regions are
+    /// produced on the detector's own queue at whatever rate Vision manages, while a stored
+    /// property on a `UIViewRepresentable` is only refreshed when SwiftUI decides to call
+    /// `updateUIView` — which for a value nothing in `CameraState` mentions is approximately
+    /// never. Pulled here, the viewfinder always draws the newest geometry; pushed, it would
+    /// draw whichever geometry happened to be current the last time an unrelated piece of
+    /// state changed.
+    var censorRegions: (@Sendable () -> [CensorRegion])?
+
+    /// One face, packed for the shader. Mirrors `CensorEllipse` in `CameraPreview.metal` field
+    /// for field.
+    ///
+    /// Explicit trailing padding rather than trusting two compilers to agree: Swift and Metal
+    /// both align `SIMD2<Float>`/`float2` to 8 bytes, so a struct ending in a single `Float`
+    /// has four bytes of tail padding either way — but "either way" is doing a lot of work in
+    /// that sentence, and a layout mismatch here is not a build error. It is a censor drawn
+    /// somewhere else in the frame, which looks like a coordinate bug and is not one.
+    struct CensorEllipseUniform {
+        var center: SIMD2<Float> = .zero
+        var radius: SIMD2<Float> = .zero
+        var rollSinCos: SIMD2<Float> = .zero
+        var mode: Float = 0
+        var unused: Float = 0
+    }
+
+    struct CensorHeaderUniform {
+        var imageSize: SIMD2<Float> = .zero
+        var count: Int32 = 0
+        var unused: Int32 = 0
+    }
+
+    /// The uniforms for one frame.
+    ///
+    /// Static and pure so the packing is testable without a Metal device — the same reason
+    /// `transform` is. Always returns a full-length array: `setFragmentBytes` rejects a zero
+    /// length, so "no faces" is a header with `count == 0` beside a buffer of unused slots
+    /// rather than no buffer at all.
+    static func censorUniforms(
+        mode: CameraCensorMode,
+        regions: [CensorRegion],
+        sourceSize: CGSize
+    ) -> (header: CensorHeaderUniform, ellipses: [CensorEllipseUniform]) {
+        var ellipses = [CensorEllipseUniform](repeating: CensorEllipseUniform(), count: CensorTracker.maximumRegions)
+        var header = CensorHeaderUniform(
+            imageSize: SIMD2<Float>(Float(sourceSize.width), Float(sourceSize.height)),
+            count: 0
+        )
+
+        guard mode.isEnabled else { return (header, ellipses) }
+
+        for (index, region) in regions.prefix(CensorTracker.maximumRegions).enumerated() {
+            ellipses[index] = CensorEllipseUniform(
+                center: SIMD2<Float>(Float(region.center.x), Float(region.center.y)),
+                radius: SIMD2<Float>(Float(region.radius.width), Float(region.radius.height)),
+                rollSinCos: SIMD2<Float>(Float(sin(region.roll)), Float(cos(region.roll))),
+                mode: Float(mode.shaderCode)
+            )
+            header.count = Int32(index + 1)
+        }
+        return (header, ellipses)
+    }
+
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
               let commandQueue = device.makeCommandQueue() else { return nil }
@@ -238,11 +305,24 @@ final class CameraPreviewRenderer: @unchecked Sendable {
 
         var tone = toneMatrix
 
+        // Pulled now rather than stored — see `censorRegions`. Geometry is in normalised
+        // sensor-buffer space, which is exactly what `texCoord` is, so nothing is converted
+        // here and the mirroring and rotation in `transform` carry the censor along with the
+        // picture for free.
+        var censor = Self.censorUniforms(
+            mode: censorMode,
+            regions: censorMode.isEnabled ? (censorRegions?() ?? []) : [],
+            sourceSize: frame.sourceSize
+        )
+        let ellipseStride = MemoryLayout<CensorEllipseUniform>.stride * censor.ellipses.count
+
         switch frame.format {
         case .bgra:
             encoder.setRenderPipelineState(bgraPipeline)
             encoder.setFragmentTexture(frame.textures[0], index: 0)
             encoder.setFragmentBytes(&tone, length: MemoryLayout<simd_float4x4>.size, index: 0)
+            encoder.setFragmentBytes(&censor.header, length: MemoryLayout<CensorHeaderUniform>.stride, index: 1)
+            encoder.setFragmentBytes(&censor.ellipses, length: ellipseStride, index: 2)
 
         case .ycbcr(let isFullRange):
             encoder.setRenderPipelineState(ycbcrPipeline)
@@ -253,6 +333,8 @@ final class CameraPreviewRenderer: @unchecked Sendable {
             encoder.setFragmentBytes(&conversion, length: MemoryLayout<simd_float3x3>.size, index: 0)
             encoder.setFragmentBytes(&offset, length: MemoryLayout<simd_float3>.size, index: 1)
             encoder.setFragmentBytes(&tone, length: MemoryLayout<simd_float4x4>.size, index: 2)
+            encoder.setFragmentBytes(&censor.header, length: MemoryLayout<CensorHeaderUniform>.stride, index: 3)
+            encoder.setFragmentBytes(&censor.ellipses, length: ellipseStride, index: 4)
         }
 
         encoder.setVertexBytes(&transform, length: MemoryLayout<simd_float4x4>.size, index: 0)

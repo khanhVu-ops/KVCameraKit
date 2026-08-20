@@ -66,6 +66,18 @@ final class AssetWriterRecorder: @unchecked Sendable {
     /// simply a recording that produces no segments — with nothing logged.
     private var segmentDelegate: SegmentDelegate?
 
+    /// Rewrites each frame's pixels on the way in. `nil` means append what arrived.
+    ///
+    /// This is the *only* hook of its kind, and it is deliberately shaped as one: it takes a
+    /// sample buffer and returns a sample buffer, so `handleVideo` below is unchanged apart from
+    /// the line that calls it, and the poster is rendered from whatever the stage produced
+    /// rather than from the original. That second part is not incidental — a censored recording
+    /// whose thumbnail shows the uncovered face has leaked exactly the thing it was hiding, into
+    /// the one image the library grid displays.
+    ///
+    /// Set before `start`. Owned by `CameraService`, because it needs the live face geometry.
+    var videoStage: CensorVideoStage?
+
     // MARK: - Lifecycle
 
     /// Whether an audio track should be created at all.
@@ -240,6 +252,10 @@ final class AssetWriterRecorder: @unchecked Sendable {
         segmentDelegate = nil
         hasStartedSession = false
         outputURL = nil
+        // The stage holds a pool of full-resolution buffers. Kept past the recording that
+        // needed them, that is a few megabytes at 1080p and tens at 4K, for a screen that may
+        // never record again.
+        videoStage?.reset()
     }
 
     // MARK: - Sample intake
@@ -260,8 +276,13 @@ final class AssetWriterRecorder: @unchecked Sendable {
     }
 
     /// Writer queue only.
-    private func handleVideo(_ sampleBuffer: CMSampleBuffer) {
+    private func handleVideo(_ incoming: CMSampleBuffer) {
         guard isRecording, let writer else { return }
+
+        // Before anything reads the format or the timing, so the input is built from the
+        // dimensions that will actually be appended and the poster comes from censored pixels.
+        // A stage that cannot render returns what it was given, so this never drops a frame.
+        let sampleBuffer = videoStage?.process(incoming) ?? incoming
 
         if videoInput == nil {
             // Built from the first buffer's own format, not from a guess. Hard-coding

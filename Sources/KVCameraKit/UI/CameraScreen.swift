@@ -55,6 +55,8 @@ public struct CameraScreen: View {
             onSelectZoom: { factor, animated in viewModel.send(.setZoom(factor, animated: animated)) },
             onToggleFilterPicker: { viewModel.send(.toggleFilterPicker) },
             onSelectFilter: { viewModel.send(.setFilter($0)) },
+            onToggleCensorPicker: { viewModel.send(.toggleCensorPicker) },
+            onSelectCensorMode: { viewModel.send(.setCensorMode($0)) },
             onTapToFocus: { devPoint, viewPoint, locked in
                 viewModel.send(.focusAt(devicePoint: devPoint, viewPoint: viewPoint, locked: locked))
             },
@@ -115,6 +117,8 @@ struct CameraContentView: View {
     let onSelectZoom: (CGFloat, Bool) -> Void
     let onToggleFilterPicker: () -> Void
     let onSelectFilter: (CameraFilter) -> Void
+    let onToggleCensorPicker: () -> Void
+    let onSelectCensorMode: (CameraCensorMode) -> Void
     let onTapToFocus: (CGPoint, CGPoint, Bool) -> Void
     let onClearFocusLock: () -> Void
     let onOpenLibrary: CameraLibraryOpener?
@@ -183,6 +187,13 @@ struct CameraContentView: View {
                                 frames: cameraService.frames,
                                 isMirrored: state.isUsingFrontCamera,
                                 tone: state.filter.tone,
+                                censorMode: state.censorMode,
+                                // A closure, not the array: the geometry updates on the
+                                // detector's queue and the viewfinder draws at 60 Hz, while
+                                // `updateUIView` runs only when something in `CameraState`
+                                // changes. Passing the value would pin the censor to whatever
+                                // SwiftUI last re-rendered for.
+                                censorRegions: { cameraService.censorRegions },
                                 onTapToFocus: { devicePoint, viewPoint, locked in
                                     guard !state.isSwitchingCamera else { return }
                                     localFocusPoint = viewPoint
@@ -264,6 +275,34 @@ struct CameraContentView: View {
                         .ignoresSafeArea()
                 }
 
+                // 3b. Horizon Level Guide
+                if state.isHorizonLevelEnabled {
+                    HorizonLevelView(
+                        angle: state.horizonAngle,
+                        isLevel: state.isHorizonLevel,
+                        isVisible: true
+                    )
+                }
+
+                // No censor overlay here, and its absence is the design.
+                //
+                // There was one: a SwiftUI layer that drew `.ultraThinMaterial` and a
+                // hand-painted checkerboard over where it believed the faces were. It could
+                // not work, for three separate reasons that all read as polish bugs. A
+                // material does not blur an `AVCaptureVideoPreviewLayer` or an `MTKView`
+                // beneath it, so the "blur" was a grey sheet and the "mosaic" was a drawn
+                // pattern rather than the picture. It mapped Vision's normalised boxes
+                // straight onto the view's size while the viewfinder was aspect **fill**,
+                // which on a 4:3 buffer in portrait discards 38% of the width — so every box
+                // was offset and 1.6x too small. And a preview overlay cannot reach the file,
+                // so the still and the recording went through a different implementation.
+                //
+                // The censor is a stage in the pixel pipeline now: `CameraPreview.metal` for
+                // the viewfinder, `CensorRenderer` for the still and the recording, one
+                // definition of the geometry in `CensorGeometry`. Rotation, mirroring and
+                // aspect fill are already solved once in the vertex transform, and the censor
+                // rides along with the picture because it is *in* the picture.
+
                 // 4. Ambient Readability Gradients (Scrims)
                 //
                 // `ignoresSafeArea` goes on the stack, not on each gradient. Applied to a
@@ -307,12 +346,16 @@ struct CameraContentView: View {
                     // builds only — see `CameraFrameStatisticsHUD` for why it is also the
                     // tap's first consumer.
                     #if DEBUG
-                    CameraFrameStatisticsHUD(
-                        frames: cameraService.frames,
-                        requestedZoom: state.currentZoom,
-                        zoomReading: { cameraService.zoomReading }
-                    )
+                    if !state.isTimerMenuOpen && !state.isCensorPickerOpen && !state.isFilterPickerOpen {
+                        CameraFrameStatisticsHUD(
+                            frames: cameraService.frames,
+                            requestedZoom: state.currentZoom,
+                            zoomReading: { cameraService.zoomReading }
+                        )
                         .padding(.top, theme.spacingS)
+                        .allowsHitTesting(false)
+                        .transition(.opacity)
+                    }
                     #endif
 
                     Spacer()
@@ -366,12 +409,13 @@ struct CameraContentView: View {
 
                         switch CameraViewfinderSwipe.classify(value.translation, canFilter: canFilter) {
                         case .mode(let step):
-                            guard !state.isFilterPickerOpen else { return }
+                            guard !state.isFilterPickerOpen && !state.isCensorPickerOpen else { return }
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
                                 onSetMode(state.mode.stepped(by: step))
                             }
 
                         case .filters(let open):
+                            guard !state.isCensorPickerOpen else { return }
                             guard open != state.isFilterPickerOpen else { return }
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                                 onToggleFilterPicker()
@@ -545,6 +589,7 @@ struct CameraContentView: View {
 
             timerButton
             filterButton
+            censorButton
 
             Spacer()
 
@@ -560,6 +605,40 @@ struct CameraContentView: View {
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.75), value: state.mode)
+    }
+
+    /// Only where the censor can actually be honoured — the same question as `canFilter`, with
+    /// a harder consequence for getting it wrong.
+    ///
+    /// A filter the preview cannot draw is a missing feature. A censor the pipeline cannot apply
+    /// is a screen that says a face is covered while it writes an uncensored file, which is what
+    /// shipping the overlay meant. So the control is absent rather than inert.
+    private var canCensor: Bool {
+        state.isCensorSupported
+    }
+
+    @ViewBuilder
+    private var censorButton: some View {
+        if canCensor {
+        Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                onToggleCensorPicker()
+            }
+        } label: {
+            Image(systemName: state.censorMode.systemIconName)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(state.censorMode.isEnabled ? Color.yellow : Color.white.opacity(0.8))
+                .frame(width: Self.topBarButtonSide, height: Self.topBarButtonSide)
+                .background(glassCircleBackground)
+                .overlay(alignment: .bottom) {
+                    Circle()
+                        .fill(Color.yellow)
+                        .frame(width: 4, height: 4)
+                        .offset(y: 3)
+                        .opacity(state.isCensorPickerOpen ? 1 : 0)
+                }
+        }
+        }
     }
 
     /// Only where the look can actually be honoured: photo mode, and a preview that can draw
@@ -760,6 +839,13 @@ struct CameraContentView: View {
                 )
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .padding(.bottom, 2)
+            } else if state.isCensorPickerOpen {
+                CameraCensorPicker(
+                    selectedMode: state.censorMode,
+                    onSelect: onSelectCensorMode
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .padding(.bottom, 6)
             } else {
                 CameraZoomPicker(
                     levels: state.zoomLevels,
@@ -1084,6 +1170,8 @@ struct CameraContentView: View {
         onSelectZoom: { _, _ in },
         onToggleFilterPicker: {},
         onSelectFilter: { _ in },
+        onToggleCensorPicker: {},
+        onSelectCensorMode: { _ in },
         onTapToFocus: { _, _, _ in },
         onClearFocusLock: {},
         onOpenLibrary: nil,
@@ -1115,6 +1203,8 @@ struct CameraContentView: View {
         onSelectZoom: { _, _ in },
         onToggleFilterPicker: {},
         onSelectFilter: { _ in },
+        onToggleCensorPicker: {},
+        onSelectCensorMode: { _ in },
         onTapToFocus: { _, _, _ in },
         onClearFocusLock: {},
         onOpenLibrary: nil,

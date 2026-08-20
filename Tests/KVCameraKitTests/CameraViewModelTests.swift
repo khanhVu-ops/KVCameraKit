@@ -46,6 +46,52 @@ final class CameraViewModelTests: XCTestCase {
         XCTAssertEqual(dismissCount, 1)
     }
 
+    func test_cameraViewModel_censor_and_horizon() {
+        let camera = StubCamera()
+        let handler = StubHandler()
+        let viewModel = makeViewModel(camera: camera, handler: handler)
+
+        XCTAssertEqual(viewModel.state.censorMode, .off)
+        XCTAssertFalse(viewModel.state.isCensorPickerOpen)
+
+        viewModel.send(.toggleCensorPicker)
+        XCTAssertTrue(viewModel.state.isCensorPickerOpen)
+
+        viewModel.send(.setCensorMode(.mosaic))
+        XCTAssertEqual(viewModel.state.censorMode, .mosaic)
+        XCTAssertFalse(viewModel.state.isCensorPickerOpen)
+
+        viewModel.send(.setCensorMode(.blur))
+        XCTAssertEqual(viewModel.state.censorMode, .blur)
+
+        viewModel.send(.setCensorMode(.censorBar))
+        XCTAssertEqual(viewModel.state.censorMode, .censorBar)
+        XCTAssertEqual(camera.censorMode, .censorBar, "the service is what actually censors")
+
+        XCTAssertTrue(viewModel.state.isHorizonLevelEnabled)
+        viewModel.send(.toggleHorizonLevel)
+        XCTAssertFalse(viewModel.state.isHorizonLevelEnabled)
+    }
+
+    /// The censor is a live pixel stage, so it needs a preview that draws its own frames and a
+    /// recorder that sees them. Where it cannot be honoured the mode is *refused* rather than
+    /// stored — a screen showing "Mosaic" while it records an uncensored file is worse than a
+    /// screen with no censor button, which is what it also gets.
+    func test_cameraViewModel_censorIsRefusedWhereItCannotBeHonoured() {
+        let camera = StubCamera()
+        camera.isCensorSupported = false
+        let viewModel = makeViewModel(camera: camera, handler: StubHandler())
+
+        XCTAssertFalse(viewModel.state.isCensorSupported)
+
+        viewModel.send(.toggleCensorPicker)
+        XCTAssertFalse(viewModel.state.isCensorPickerOpen)
+
+        viewModel.send(.setCensorMode(.mosaic))
+        XCTAssertEqual(viewModel.state.censorMode, .off)
+        XCTAssertEqual(camera.censorMode, .off, "the service must not be left censoring either")
+    }
+
     func test_cameraViewModel_zoom_and_exposure() {
         let camera = StubCamera()
         let handler = StubHandler()
@@ -841,6 +887,16 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
     var isUsingFrontCamera = false
     var onAvailabilityChange: (@Sendable (Bool) -> Void)?
     var onHardwareControlChange: (@Sendable (CameraHardwareControlChange) -> Void)?
+
+    /// Stored rather than left to the protocol's default, so a test can tell "the ViewModel
+    /// never told the service" apart from "the service ignored it" — the default swallows the
+    /// setter, which would make either assertion pass.
+    var censorMode: CameraCensorMode = .off
+
+    /// Stands in for a service configured with both engines that can carry a censor — the
+    /// Metal preview and the asset writer. `false` is the release configuration, and it has its
+    /// own test below.
+    var isCensorSupported = true
 
     var setupResult = true
     /// Lets a test hold the session "coming up", which on a real phone takes the better part

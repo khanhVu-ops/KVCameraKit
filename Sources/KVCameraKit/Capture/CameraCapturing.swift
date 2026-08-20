@@ -204,6 +204,25 @@ protocol CameraCapturing: AnyObject, Sendable {
     /// triggering a second pipeline rebuild on a running session.
     func setHardwareControlLabels(_ labels: CameraControlLabels)
 
+    /// The active privacy censor mode (Off / Mosaic / Blur / Censor Bar).
+    var censorMode: CameraCensorMode { get set }
+
+    /// Whether this configuration can honour a censor mode at all — see
+    /// `CameraService.isCensorSupported`. The screen hides the control when it cannot, because
+    /// the alternative is a control that appears to work and records uncensored video.
+    var isCensorSupported: Bool { get }
+
+    /// The live face geometry, in sensor-buffer space. Pulled per drawn frame rather than
+    /// pushed, so the viewfinder always draws the newest geometry rather than whatever was
+    /// current the last time SwiftUI happened to re-render.
+    var censorRegions: [CensorRegion] { get }
+
+    /// Callback when horizon level / motion changes (angleDegrees, isLevel).
+    var onHorizonMotion: (@Sendable (Double, Bool) -> Void)? { get set }
+
+    func startMotionObserver()
+    func stopMotionObserver()
+
     /// Where the zoom actually is. `nil` on a machine with no camera.
     ///
     /// A diagnostic, and it earns its place in the protocol the same way the frame counter
@@ -222,4 +241,10 @@ protocol CameraCapturing: AnyObject, Sendable {
 
 extension CameraCapturing {
     func setHardwareControlLabels(_ labels: CameraControlLabels) {}
+    var censorMode: CameraCensorMode { get { .off } set {} }
+    var isCensorSupported: Bool { false }
+    var censorRegions: [CensorRegion] { [] }
+    var onHorizonMotion: (@Sendable (Double, Bool) -> Void)? { get { nil } set {} }
+    func startMotionObserver() {}
+    func stopMotionObserver() {}
 }

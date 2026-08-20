@@ -2,6 +2,59 @@
 
 All notable changes to KVCameraKit are documented in this file.
 
+## Unreleased
+
+### Changed
+
+- **Face censoring is now a stage in the pixel pipeline instead of an overlay on top of it.**
+  Mosaic, blur and the censor bar are applied in `CameraPreview.metal` for the viewfinder and in
+  `CensorRenderer` for the still and the recording, from one definition of the geometry in
+  `CensorGeometry`. The old `CensorFaceOverlayView` is gone.
+
+  Same shape as the tone stage, and for the same reason: the geometry — the part with the bugs
+  in it — has exactly one definition, and what is duplicated is only how the pixels are averaged.
+
+  The censor control is hidden unless the preview engine draws its own frames *and* the recorder
+  sees them (`CameraCapturing.isCensorSupported`), which today means debug builds. A censor that
+  cannot reach the pixels must not be offered: it looks applied and records uncensored.
+
+### Fixed
+
+- **A censored recording was not censored.** `CensorRenderer` was only ever called on the photo
+  path, so with the feature on, video came out of the vault with every face legible — while the
+  preview had shown them covered for the whole recording. Frames now pass through
+  `CensorVideoStage` on their way into `AssetWriterRecorder`, and the poster is rendered from the
+  censored frame rather than the original.
+
+- **Detection ran on the wrong orientation.** `orientation: .up` was passed unconditionally, so
+  in portrait every face in the landscape sensor buffer was lying on its side — which a face
+  detector mostly does not find at all. The orientation now comes from the frame's own rotation
+  angle, so detection and the pixels it describes cannot disagree.
+
+- **The censor was drawn in the wrong place.** The overlay mapped Vision's normalised boxes
+  straight onto the view's size while the viewfinder was aspect **fill**, which on a 4:3 buffer
+  in portrait discards 38% of the width — every region offset and 1.6× too small. The geometry
+  now lives in sensor-buffer space, which is what `texCoord` is, so rotation, mirroring and
+  aspect fill are carried by the transform that already existed.
+
+- **The censor blinked off, and lagged behind a moving face.** `CensorTracker` gives each face a
+  stable identity across frames, holds a lost track for half a second while growing it, and
+  smooths size and roll hard while letting position snap. The old box carried a
+  `.spring(response: 0.25)` — a quarter second of visible face on every movement — and was keyed
+  by array index, so two faces swapped identities whenever Vision reordered its observations.
+
+- **The mosaic and blur were sized from the frame instead of the face.** A distant face became
+  two grey blocks and a close one stayed recognisable. Both are now proportional to the face, and
+  the mosaic grid is anchored on it so the blocks travel with it rather than sliding across it.
+
+- **The mosaic point-sampled instead of averaging.** Each cell took one pixel, so fine detail
+  survived as detail made of blocks — ugly, and weaker as a censor than an average is. Both paths
+  now average within the cell.
+
+- **Filters ran on the whole frame to censor a fraction of it.** `CIPixellate` and
+  `CIGaussianBlur` were applied to the entire image — at 4K, twice per frame — and hidden behind
+  a hard-edged rectangular mask. Every filter now runs on a crop, behind a feathered ellipse.
+
 ## 1.5.0 - 2026-08-20
 
 ### Added
