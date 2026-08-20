@@ -6,6 +6,57 @@ All notable changes to KVCameraKit are documented in this file.
 
 ### Fixed
 
+- **Zoom did nothing for the first second on the camera screen.** Bringing a session up on a
+  phone takes the better part of a second and the screen is interactive throughout, so every
+  zoom in that window hit `guard let device = activeDevice else { return }` and vanished —
+  while the pill moved, because the screen's own state had already changed. The request is now
+  remembered and applied when the lens arrives. And when the capabilities land, the factor the
+  user chose is *clamped* into the new range instead of being reset to 1×, which is what
+  visibly snapped the pill back.
+
+  A range of exactly `1…1` is also no longer treated as a clamp: that is what the ladder
+  reports when it could not make sense of the hardware, and clamping every request to 1× on
+  the strength of a failed read is the same bug as dropping it.
+
+- **Rotating the device spun the preview inside the frame.** The Metal viewfinder was fed
+  `videoRotationAngleForHorizonLevelCapture` — the angle that keeps a *recording* level with
+  gravity, so it tracks the device as it turns. Applied to a preview inside a view UIKit has
+  already rotated, it turns the picture a second time. A preview needs the compensation for
+  where the *interface* is, which is what the system camera does and what
+  `CaptureRotation.previewAngle(for:)` now computes; the view reads its own window's
+  orientation, being the thing that got rotated.
+
+- **The video thumbnail faced 180° away from its video.** Core Image's y runs up and a video
+  track's transform is in the image's y-down space, so handing `CapturePosterRenderer` the
+  recorder's matrix turned the poster the opposite way. It takes the angle now.
+
+- **A photo capture turned the Metal preview black until the shutter finished.** The renderer
+  cleared its frame as soon as it had been drawn, so a redraw was impossible without a new
+  frame from the camera — and a `CAMetalLayer` hands back an empty drawable pool whenever its
+  size changes, which the capture-flight overlay triggers. A still capture is exactly when
+  AVFoundation stops sending frames, so the cleared layer stayed black for as long as the
+  photo took, and only for photos. The last frame is now held until the next one replaces it,
+  which is what this file always claimed it did.
+
+### Added
+
+- `CaptureRotation` — the y-down and y-up conventions in one place, named after the spaces
+  they belong to rather than after whichever caller needed one first. Three bugs came out of
+  mixing them: an upside-down viewfinder, a preview that spun with the device, and a thumbnail
+  facing away from its own video. Using the wrong one is never subtly wrong; it is exactly
+  180° wrong, which fills the frame correctly and looks like a rotation that was applied.
+
+### Changed
+
+- **`SimulatedFrameSource` now delivers landscape buffers with an orientation marker.** It
+  produced upright portrait frames needing no rotation, which is why an upside-down viewfinder
+  could only be seen on a phone — the simulator was exercising a path no device takes. A
+  device hands back the sensor's own landscape buffer and leaves the turn to whoever draws it,
+  so the stand-in does too, and a yellow square marks the buffer's top-left corner: in a
+  correctly turned portrait preview it belongs at the top-right of the screen.
+
+### Fixed (previously)
+
 - **The Metal viewfinder was upside down on a device.** Both cameras, 180° out, with a
   perfectly smooth stream — which is what made it look like anything but a rotation that had
   been applied, and had.

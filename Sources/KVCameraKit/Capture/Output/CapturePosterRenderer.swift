@@ -14,13 +14,19 @@ enum CapturePosterRenderer {
     /// A JPEG of the frame, oriented by the recording's track transform and no larger than
     /// `maxDimension`.
     ///
-    /// The transform matters: the recording carries its rotation in the container header, so
-    /// a poster taken from raw pixels is sideways exactly where the video is not — and a
-    /// library of portrait clips with landscape thumbnails is the sort of wrong that looks
-    /// like a layout bug.
+    /// The rotation matters: the recording carries its own in the container header, so a
+    /// poster taken from raw pixels is sideways exactly where the video is not — and a library
+    /// of portrait clips with landscape thumbnails is the sort of wrong that looks like a
+    /// layout bug.
+    ///
+    /// It takes the **angle**, not the track transform, and that is the fix for a bug this
+    /// shipped with: Core Image's y runs up while the track transform's runs down, so handing
+    /// this the recorder's matrix turned the poster the opposite way and every video thumbnail
+    /// faced 180° away from its own video. `CaptureRotation` is where the two conventions
+    /// live now.
     static func jpeg(
         from sampleBuffer: CMSampleBuffer,
-        transform: CGAffineTransform,
+        rotationAngle: CGFloat,
         maxDimension: CGFloat = 640
     ) -> Data? {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
@@ -35,7 +41,7 @@ enum CapturePosterRenderer {
             image = image.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         }
 
-        image = image.transformed(by: transform)
+        image = image.transformed(by: CaptureRotation.imageTransform(degrees: rotationAngle))
         // A rotation puts the extent's origin negative, and an image whose origin is not at
         // zero encodes as a blank of the same size.
         image = image.transformed(

@@ -32,7 +32,14 @@ final class SimulatedFrameSource: FrameSource, @unchecked Sendable {
 
     private var formatDescription: CMFormatDescription?
 
-    init(size: CGSize = CGSize(width: 1080, height: 1920), frameRate: Int = 30) {
+    /// **Landscape**, because that is the shape a device delivers.
+    ///
+    /// It used to be 1080x1920 — portrait, already upright, needing no rotation — and that is
+    /// why an upside-down viewfinder could only be seen on a phone: the simulator was
+    /// exercising a path no device takes. An `AVCaptureVideoDataOutput` hands back the
+    /// sensor's own landscape buffer and leaves the turn to whoever draws it, so the stand-in
+    /// does too, and the whole rotation path is now live on a Mac.
+    init(size: CGSize = CGSize(width: 1920, height: 1080), frameRate: Int = 30) {
         self.size = size
         self.frameRate = frameRate
     }
@@ -121,8 +128,15 @@ final class SimulatedFrameSource: FrameSource, @unchecked Sendable {
         }
     }
 
-    /// A gradient with a bar that sweeps across it, because a static image cannot tell a
-    /// stopped stream from a running one.
+    /// A bar that sweeps, so a stopped stream is distinguishable from a running one, and a
+    /// marker in one corner of the *buffer*, so a wrong turn is distinguishable from a right
+    /// one.
+    ///
+    /// The marker is the interesting half. A pattern symmetric under rotation cannot show an
+    /// orientation bug, which is how the viewfinder shipped upside down: on a simulator there
+    /// was simply nothing to look at that could be wrong. This marks the buffer's first row
+    /// and first column — its top-left in memory — and in a correctly turned portrait preview
+    /// it belongs at the **top-right** of the screen.
     private func makePixelBuffer(phase: Double) -> CVPixelBuffer? {
         var pixelBuffer: CVPixelBuffer?
         let attributes: [String: Any] = [
@@ -157,11 +171,17 @@ final class SimulatedFrameSource: FrameSource, @unchecked Sendable {
         context.setFillColor(UIColor.darkGray.cgColor)
         context.fill(CGRect(origin: .zero, size: size))
 
-        let barHeight = size.height / 8
-        let travel = size.height + barHeight
-        let y = (phase * travel).truncatingRemainder(dividingBy: travel) - barHeight
+        let barWidth = size.width / 8
+        let travel = size.width + barWidth
+        let x = (phase * travel).truncatingRemainder(dividingBy: travel) - barWidth
         context.setFillColor(UIColor.systemIndigo.cgColor)
-        context.fill(CGRect(x: 0, y: y, width: size.width, height: barHeight))
+        context.fill(CGRect(x: x, y: 0, width: barWidth, height: size.height))
+
+        // The buffer's top-left corner, which a `CGContext` over a pixel buffer addresses at
+        // the origin because its y runs down the rows.
+        let marker = min(size.width, size.height) / 6
+        context.setFillColor(UIColor.systemYellow.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: marker, height: marker))
 
         return buffer
     }

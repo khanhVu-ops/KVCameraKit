@@ -205,8 +205,9 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         session.startRunning()
         isSessionStarted = session.isRunning
 
-        // Explicitly sync hardware zoom factor to 1.0 (1x Wide)
-        applyZoom(to: device, uiFactor: 1.0, animated: false)
+        // Whatever the screen last asked for — 1× if nobody has touched it, and the factor
+        // the user picked while the session was still coming up if they did.
+        applyZoom(to: device, uiFactor: requestedZoomFactor, animated: false)
 
         return session.isRunning
     }
@@ -260,7 +261,11 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
         session.commitConfiguration()
 
-        // Reset zoom to 1x on switch
+        // Reset to 1× on a swap, deliberately: the lens layouts differ, so a 5× held on a
+        // triple camera is not a thing the front camera can honour. The *request* is reset
+        // with it, or the next session rebuild would resurrect a factor the screen no longer
+        // shows.
+        requestedZoomFactor = 1.0
         applyZoom(to: newDevice, uiFactor: 1.0, animated: false)
     }
 
@@ -305,10 +310,23 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
     func setZoom(factor: CGFloat, animated: Bool = true) {
         sessionQueue.async { [weak self] in
-            guard let self = self, let device = self.activeDevice else { return }
+            guard let self = self else { return }
+            // Remembered whether or not there is a device yet, and this is the fix for
+            // "zoom does nothing for the first second on the camera screen": bringing the
+            // session up on a real phone takes the better part of a second, `activeDevice`
+            // is nil until it lands, and every zoom until then used to hit `guard else
+            // return` and vanish — while the pill moved, because the screen's own state had
+            // already changed. The request now waits for the lens instead of being dropped.
+            self.requestedZoomFactor = factor
+            guard let device = self.activeDevice else { return }
             self.applyZoom(to: device, uiFactor: factor, animated: animated)
         }
     }
+
+    /// The last zoom the screen asked for, in UI factors. Session queue only.
+    ///
+    /// Starts at 1× because that is what the pill shows before anyone touches it.
+    private var requestedZoomFactor: CGFloat = 1.0
 
     /// The one path that moves the lens, so the Camera Control HUD cannot be left behind by
     /// a pinch or a tap on the pill.
@@ -471,7 +489,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             // second, and every player honours it.
             assetWriter.start(
                 to: outputURL,
-                transform: Self.transform(forCaptureAngle: latestCaptureAngle),
+                rotationDegrees: latestCaptureAngle,
                 includesAudio: isAudioTapAttached
             )
             attachRecordingTaps()
@@ -483,7 +501,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             let pump = CaptureStreamPump(sink: sink)
             streamPump = pump
             assetWriter.startStreaming(
-                transform: Self.transform(forCaptureAngle: latestCaptureAngle),
+                rotationDegrees: latestCaptureAngle,
                 includesAudio: isAudioTapAttached,
                 onSegment: { pump.enqueue($0) }
             )
@@ -554,6 +572,6 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     /// Static and pure because "the video is sideways" is the classic recorder bug and it
     /// should not need a device to catch.
     static func transform(forCaptureAngle angle: CGFloat) -> CGAffineTransform {
-        CGAffineTransform(rotationAngle: angle * .pi / 180)
+        CaptureRotation.trackTransform(degrees: angle)
     }
 }

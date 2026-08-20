@@ -33,7 +33,7 @@ final class CameraPreviewRenderer: @unchecked Sendable {
 
     private let lock = NSLock()
 
-    /// The newest frame's textures, replaced rather than queued.
+    /// The newest frame's textures, replaced rather than queued, and held until replaced.
     ///
     /// This is a deliberate, bounded exception to the rule in `CameraFrame`: a
     /// `CVMetalTexture` retains the underlying IOSurface, so holding one holds a buffer from
@@ -41,6 +41,16 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     /// when the next lands, is what every Metal camera pipeline does and what the pool is
     /// sized for. Queueing them — or holding one indefinitely — is what empties the pool and
     /// makes delivery stop silently.
+    ///
+    /// *Until replaced* is load-bearing, and it was not always so: this used to be cleared
+    /// the moment it had been drawn, which made a redraw impossible without a new frame from
+    /// the camera. That is fine at 30 fps and catastrophic the moment something clears the
+    /// layer — a `CAMetalLayer` hands back a fresh, empty drawable pool whenever its size
+    /// changes, so a single re-layout left the viewfinder **black** until the next frame
+    /// arrived. Which is exactly what a still capture stops sending: AVFoundation suspends the
+    /// video data output for the duration, so taking a photo turned the preview black for as
+    /// long as the shutter took, and only for photos. Keeping the last frame makes every
+    /// redraw idempotent, which is what the paragraph above always described.
     private var pending: PendingFrame?
 
     private struct PendingFrame {
@@ -64,6 +74,16 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     /// Mirrored horizontally, for the front camera. The preview is a mirror in every camera
     /// app because that is what people expect of their own face; the *capture* is not.
     var isMirrored = false
+
+    /// The turn that makes the buffer upright in the interface the user is holding, set by the
+    /// view that owns the drawable.
+    ///
+    /// **Not** the angle on the frame. That one is `videoRotationAngleForHorizonLevelCapture`,
+    /// which tracks gravity so a *recording* comes out level — and a preview inside a view
+    /// UIKit has already rotated does not want it: applying it turned the picture a second
+    /// time, so rotating the phone spun the image inside the frame. See
+    /// `CaptureRotation.previewAngle(for:)`.
+    var previewRotationAngle: CGFloat = 90
 
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
@@ -199,7 +219,7 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         var transform = Self.transform(
             source: frame.sourceSize,
             destination: view.drawableSize,
-            rotationAngle: frame.rotationAngle,
+            rotationAngle: previewRotationAngle,
             mirrored: isMirrored
         )
 
@@ -224,13 +244,8 @@ final class CameraPreviewRenderer: @unchecked Sendable {
 
         buffer.present(drawable)
         buffer.commit()
-
-        // The textures are released here, one frame after they were taken from the pool.
-        lock.lock()
-        if pending?.holders.first === frame.holders.first {
-            pending = nil
-        }
-        lock.unlock()
+        // Deliberately not cleared. `accept` releases these when the next frame lands, so
+        // exactly one buffer is held and any number of redraws can use it.
     }
 
     // MARK: - Geometry
@@ -267,7 +282,7 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         // `hypot` or `abs`, so all of them pinned how much the quad was scaled and none of
         // them pinned which way it turned. Direction is now asserted — see
         // `test_aQuarterTurnSendsTheImagesTopLeftToTheTopRight`.
-        let radians = Float(-rotationAngle * .pi / 180)
+        let radians = CaptureRotation.clipSpaceRadians(degrees: rotationAngle)
         if radians != 0 {
             let cosine = cos(radians)
             let sine = sin(radians)

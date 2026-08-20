@@ -80,12 +80,12 @@ final class AssetWriterRecorder: @unchecked Sendable {
 
     /// Prepares a writer that finishes a file. The session itself starts on the first video
     /// sample.
-    func start(to url: URL, transform: CGAffineTransform, includesAudio: Bool = true) {
+    func start(to url: URL, rotationDegrees: CGFloat, includesAudio: Bool = true) {
         writerQueue.sync {
             try? FileManager.default.removeItem(at: url)
 
             guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mov) else { return }
-            self.begin(with: writer, destination: .file(url), transform: transform, includesAudio: includesAudio)
+            self.begin(with: writer, destination: .file(url), rotationDegrees: rotationDegrees, includesAudio: includesAudio)
             self.outputURL = url
         }
     }
@@ -95,7 +95,7 @@ final class AssetWriterRecorder: @unchecked Sendable {
     /// `onSegment` receives the initialization segment first and each media segment after it,
     /// in order. Concatenated, they are the recording.
     func startStreaming(
-        transform: CGAffineTransform,
+        rotationDegrees: CGFloat,
         includesAudio: Bool,
         onSegment: @escaping @Sendable (Data) -> Void
     ) {
@@ -116,7 +116,7 @@ final class AssetWriterRecorder: @unchecked Sendable {
             writer.delegate = delegate
 
             self.segmentDelegate = delegate
-            self.begin(with: writer, destination: .stream(onSegment), transform: transform, includesAudio: includesAudio)
+            self.begin(with: writer, destination: .stream(onSegment), rotationDegrees: rotationDegrees, includesAudio: includesAudio)
             self.outputURL = nil
         }
     }
@@ -125,12 +125,14 @@ final class AssetWriterRecorder: @unchecked Sendable {
     private func begin(
         with writer: AVAssetWriter,
         destination: Destination,
-        transform: CGAffineTransform,
+        rotationDegrees: CGFloat,
         includesAudio: Bool
     ) {
         self.writer = writer
         self.destination = destination
-        self.transform = transform
+        self.rotationDegrees = rotationDegrees
+        // y-down, because a video track's transform is in the image's own space.
+        self.transform = CaptureRotation.trackTransform(degrees: rotationDegrees)
         self.includesAudio = includesAudio
         self.hasStartedSession = false
         self.isRecording = true
@@ -148,6 +150,9 @@ final class AssetWriterRecorder: @unchecked Sendable {
     /// full-frame copy 30 times a second to achieve what one matrix in the container header
     /// does for free. Players and editors honour it.
     private var transform: CGAffineTransform = .identity
+    /// The same rotation as a number, kept because the poster needs it in a coordinate space
+    /// where the matrix above means the opposite thing — see `CaptureRotation`.
+    private var rotationDegrees: CGFloat = 0
 
     /// Facts about the recording that only the recorder is in a position to know, gathered as
     /// the samples go past. Writer queue only.
@@ -301,7 +306,7 @@ final class AssetWriterRecorder: @unchecked Sendable {
             // The poster comes from the first frame that actually made it into the file, and
             // from *this* side of the encoder — a streamed recording has no file left to
             // decode one out of.
-            posterData = CapturePosterRenderer.jpeg(from: sampleBuffer, transform: transform)
+            posterData = CapturePosterRenderer.jpeg(from: sampleBuffer, rotationAngle: rotationDegrees)
         }
 
         guard writer.status == .writing, videoInput.isReadyForMoreMediaData else { return }

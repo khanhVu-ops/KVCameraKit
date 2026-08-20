@@ -40,7 +40,7 @@ final class AssetWriterRecorderTests: XCTestCase {
         let recorder = AssetWriterRecorder()
         let url = Self.temporaryURL()
 
-        recorder.start(to: url, transform: .identity)
+        recorder.start(to: url, rotationDegrees: 0)
         let result = await recorder.stop()
 
         XCTAssertNil(result)
@@ -56,10 +56,10 @@ final class AssetWriterRecorderTests: XCTestCase {
     /// Starting twice must not leave the first writer half-finished.
     func test_restartingReplacesThePreviousWriter() async {
         let recorder = AssetWriterRecorder()
-        recorder.start(to: Self.temporaryURL(), transform: .identity)
+        recorder.start(to: Self.temporaryURL(), rotationDegrees: 0)
 
         let second = Self.temporaryURL()
-        recorder.start(to: second, transform: .identity)
+        recorder.start(to: second, rotationDegrees: 0)
         XCTAssertEqual(recorder.outputURL, second)
 
         _ = await recorder.stop()
@@ -74,7 +74,7 @@ final class AssetWriterRecorderTests: XCTestCase {
     func test_audioBeforeTheFirstVideoFrameDoesNotStartTheFile() async throws {
         let recorder = AssetWriterRecorder()
         let url = Self.temporaryURL()
-        recorder.start(to: url, transform: .identity)
+        recorder.start(to: url, rotationDegrees: 0)
 
         for index in 0..<10 {
             recorder.appendAudio(try Self.silentAudioSample(index: Int64(index)))
@@ -94,7 +94,7 @@ final class AssetWriterRecorderTests: XCTestCase {
     func test_appendingVideoAndAudioProducesAPlayableFileWithBothTracks() async throws {
         let recorder = AssetWriterRecorder()
         let url = Self.temporaryURL()
-        recorder.start(to: url, transform: .identity)
+        recorder.start(to: url, rotationDegrees: 0)
 
         // Real time matters to the writer: `expectsMediaDataInRealTime` means it drops what it
         // is not ready for, so the samples are paced rather than dumped in a loop.
@@ -131,7 +131,7 @@ final class AssetWriterRecorderTests: XCTestCase {
     func test_theTrackCarriesTheRotationTransform() async throws {
         let recorder = AssetWriterRecorder()
         let url = Self.temporaryURL()
-        recorder.start(to: url, transform: CameraService.transform(forCaptureAngle: 90))
+        recorder.start(to: url, rotationDegrees: 90)
 
         for index in 0..<12 {
             recorder.appendVideo(CameraFrame(
@@ -169,7 +169,7 @@ final class AssetWriterRecorderTests: XCTestCase {
         let recorder = AssetWriterRecorder()
         let collected = SegmentLog()
 
-        recorder.startStreaming(transform: .identity, includesAudio: true) { collected.append($0) }
+        recorder.startStreaming(rotationDegrees: 0, includesAudio: true) { collected.append($0) }
 
         for index in 0..<70 {
             recorder.appendVideo(CameraFrame(
@@ -225,10 +225,7 @@ final class AssetWriterRecorderTests: XCTestCase {
     /// where it decides the aspect ratio of every grid cell.
     func test_streamedDimensionsAreOriented() async throws {
         let recorder = AssetWriterRecorder()
-        recorder.startStreaming(
-            transform: CameraService.transform(forCaptureAngle: 90),
-            includesAudio: false
-        ) { _ in }
+        recorder.startStreaming(rotationDegrees: 90, includesAudio: false) { _ in }
 
         for index in 0..<20 {
             recorder.appendVideo(CameraFrame(
@@ -254,7 +251,7 @@ final class AssetWriterRecorderTests: XCTestCase {
     func test_streamingWithoutAVideoSampleProducesNoSegmentsAndNoSummary() async throws {
         let recorder = AssetWriterRecorder()
         let collected = SegmentLog()
-        recorder.startStreaming(transform: .identity, includesAudio: true) { collected.append($0) }
+        recorder.startStreaming(rotationDegrees: 0, includesAudio: true) { collected.append($0) }
 
         for index in 0..<10 {
             recorder.appendAudio(try Self.silentAudioSample(index: Int64(index)))

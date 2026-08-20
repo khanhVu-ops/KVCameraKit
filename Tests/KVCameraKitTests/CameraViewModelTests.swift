@@ -400,6 +400,61 @@ final class CameraViewModelTests: XCTestCase {
 
     private var dismissCount = 0
 
+    /// A zoom chosen while the session is still starting has to survive it.
+    ///
+    /// Bringing a session up on a device takes the better part of a second, and the screen is
+    /// already interactive. The pill moved because the screen's own state changed; then the
+    /// capabilities landed and reset it to 1×, so the whole gesture read as "zoom is ignored
+    /// for the first second".
+    func test_aZoomChosenWhileTheSessionIsStartingIsKept() async throws {
+        let camera = StubCamera()
+        camera.setupDelayNanoseconds = 300_000_000
+        let viewModel = makeViewModel(camera: camera)
+
+        viewModel.send(.onAppear)
+        viewModel.send(.setZoom(2.0, animated: true))
+        XCTAssertEqual(viewModel.state.currentZoom, 2.0)
+
+        try await waitUntil { viewModel.state.authorization == .authorized }
+
+        // Still 2×, clamped into the range that has only now arrived — not reset to 1×.
+        XCTAssertEqual(viewModel.state.currentZoom, 2.0)
+        XCTAssertEqual(camera.appliedZoom, 2.0)
+    }
+
+    /// A hardware read that failed must not become a clamp that swallows every zoom.
+    ///
+    /// `CameraZoomLadder.range` reports `1…1` when it cannot make sense of the device, and
+    /// clamping to that is indistinguishable, from the user's side, from zoom being ignored.
+    func test_aDegenerateRangeDoesNotClampEveryRequestToOne() async throws {
+        let camera = StubCamera()
+        camera.range = 1.0...1.0
+        let viewModel = makeViewModel(camera: camera)
+
+        viewModel.send(.onAppear)
+        try await waitUntil { viewModel.state.authorization == .authorized }
+        XCTAssertNil(viewModel.state.zoomRange, "1…1 is a failed read, not a range")
+
+        viewModel.send(.setZoom(2.0, animated: true))
+        XCTAssertEqual(viewModel.state.currentZoom, 2.0)
+        XCTAssertEqual(camera.appliedZoom, 2.0, "the device does its own clamping")
+    }
+
+    /// And a factor outside what the lens turns out to support is pulled into range rather
+    /// than left promising something the hardware cannot do.
+    func test_aZoomChosenTooHighIsClampedOnceTheRangeArrives() async throws {
+        let camera = StubCamera()
+        camera.setupDelayNanoseconds = 200_000_000
+        camera.range = 1.0...4.0
+        let viewModel = makeViewModel(camera: camera)
+
+        viewModel.send(.onAppear)
+        viewModel.send(.setZoom(9.0, animated: true))
+        try await waitUntil { viewModel.state.authorization == .authorized }
+
+        XCTAssertEqual(viewModel.state.currentZoom, 4.0)
+    }
+
     // MARK: - Streaming a recording
 
     /// The streaming engine asks the host for a destination, and hands it to the service.
@@ -643,6 +698,9 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
     var onHardwareControlChange: (@Sendable (CameraHardwareControlChange) -> Void)?
 
     var setupResult = true
+    /// Lets a test hold the session "coming up", which on a real phone takes the better part
+    /// of a second — the window in which zoom used to be silently dropped.
+    var setupDelayNanoseconds: UInt64 = 0
     var captureError: Error?
     var captureDelayNanoseconds: UInt64 = 0
     var zoomLevels: [CGFloat] = [0.5, 1.0, 2.0]
@@ -661,7 +719,12 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
     /// honest about the shape of the thing it stands in for.
     let frames: any FrameSource = StubFrameSource()
 
-    func setupSession() async -> Bool { setupResult }
+    func setupSession() async -> Bool {
+        if setupDelayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: setupDelayNanoseconds)
+        }
+        return setupResult
+    }
     func stopSession() { didStopSession = true }
     func switchCamera() async {
         switchCount += 1

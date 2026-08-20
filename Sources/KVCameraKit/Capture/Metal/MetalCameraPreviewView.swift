@@ -98,6 +98,14 @@ struct MetalCameraPreviewView: UIViewRepresentable {
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
         func draw(in view: MTKView) {
+            // Read here rather than observed, because *this view* is the thing being rotated
+            // and its own window is the only authority on where the interface currently is.
+            // Two property reads a frame, against the alternative of a notification whose
+            // ordering against UIKit's own rotation is not guaranteed — and a preview that is
+            // briefly sideways mid-rotation is exactly what this is fixing.
+            renderer?.previewRotationAngle = CaptureRotation.previewAngle(
+                for: view.window?.windowScene?.interfaceOrientation ?? .portrait
+            )
             renderer?.draw(in: view)
         }
 

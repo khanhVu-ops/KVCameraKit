@@ -689,8 +689,17 @@ final class CameraViewModel {
     private func refreshZoomCapabilities() {
         let range = cameraService.zoomRange()
         state.zoomLevels = cameraService.availableZoomLevels()
-        state.zoomRange = range
-        state.currentZoom = min(max(1.0, range.lowerBound), range.upperBound)
+        // A range of exactly 1…1 is what `CameraZoomLadder` returns when it could not make
+        // sense of the hardware, not a camera that genuinely cannot zoom. Treated as "not
+        // known yet" rather than as a clamp, because clamping every request to 1× on the
+        // strength of a failed read is the same bug as dropping it: the device clamps
+        // properly on its own, so passing the request through is strictly better.
+        state.zoomRange = range.lowerBound < range.upperBound ? range : nil
+        // Clamped, not reset. This runs when the session finishes coming up — a second or so
+        // after the screen appeared — and it used to overwrite the factor with 1×, so a zoom
+        // chosen during that second was visibly snapped back. The pill now keeps what the
+        // user picked, and only the range it is clamped into is news.
+        state.currentZoom = min(max(state.currentZoom, range.lowerBound), range.upperBound)
     }
 
     // MARK: - Helpers
