@@ -158,11 +158,14 @@ final class CameraViewModel {
     init(
         handler: any CameraArtifactHandler,
         onDismiss: @escaping () -> Void,
-        cameraService: (any CameraCapturing)? = nil
+        cameraService: (any CameraCapturing)? = nil,
+        recordingEngine: CameraRecordingEngine = .movieFile
     ) {
         self.handler = handler
         self.onDismiss = onDismiss
-        self.cameraService = cameraService ?? CameraService()
+        // The engine reaches the service at construction because it decides which outputs go
+        // on the session, which cannot be changed once a recording is in flight.
+        self.cameraService = cameraService ?? CameraService(recordingEngine: recordingEngine)
     }
 
     func send(_ action: Action) {

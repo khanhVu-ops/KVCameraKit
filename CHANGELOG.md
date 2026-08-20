@@ -6,6 +6,62 @@ All notable changes to KVCameraKit are documented in this file.
 
 Nothing yet.
 
+## 1.3.0 - 2026-08-20
+
+### Added
+
+- **An `AVAssetWriter` recorder, behind a flag.** `CameraRecordingEngine` selects between
+  `AVCaptureMovieFileOutput` (`.movieFile`, the default) and appending samples ourselves
+  (`.assetWriter`). Pass it to `CameraScreen(recordingEngine:)`.
+
+  Same reasoning as the preview engine, with more at stake. With `AVCaptureMovieFileOutput`
+  the app never sees the bytes, so it can neither record filtered frames nor encrypt as it
+  writes — only wait for a finished plaintext file and re-read it. Both of those are
+  upcoming, and both are impossible on the old path. But a viewfinder that regresses is
+  obvious immediately, while a recorder that regresses is discovered *after* the moment is
+  gone, so the working path stays the default.
+
+- `CameraAudioTap`, an `AVCaptureAudioDataOutput`. The movie-file output took audio straight
+  off the session input; a writer has to be handed the samples.
+
+### Changed
+
+- **The two recording engines are now mutually exclusive on the session.**
+  `AVCaptureMovieFileOutput` and `AVCaptureVideoDataOutput` coexisting is a constraint that
+  varies by device and configuration, and the failure is silent: `canAddOutput` returns
+  `false` and the frame tap never attaches, so a Metal preview shows black and a scanner
+  never finds a page with nothing logged. Only the outputs the chosen engine needs go on the
+  session, which removes the question rather than hoping about it. This closes a latent risk
+  introduced in 1.0.0, when the frame tap could attach alongside the movie output.
+
+- **Video recording now works on a simulator.** The asset-writer path takes its frames from
+  `FrameSource`, which is simulated where there is no camera — so unlike every previous
+  recorder it produces a real, playable file on a machine with no hardware. Audio is the only
+  part that cannot be faked, and the writer is told so rather than left to create a track
+  nothing fills: an `AVAssetWriterInput` cannot be added after `startWriting`, so an audio
+  track has to be committed to before any audio arrives, and one that receives nothing is a
+  file some players open and others refuse.
+
+### Notes
+
+Three guards worth knowing about, each against a way a real-time writer produces something
+that looks like success:
+
+`stop()` returns `nil` when no sample was ever appended. `AVAssetWriter` will happily finish
+a *valid* file with no tracks, and storing that gives the user an unplayable item
+indistinguishable from a real recording until they tap it.
+
+The session starts on the first **video** sample, never on audio. A microphone warms up
+faster than a camera, so the first buffers are reliably audio, and starting on them opens the
+file with sound over no picture — which every player shows as black.
+
+Rotation is a track transform, not rotated pixels: one matrix in the container header rather
+than a full-frame copy thirty times a second.
+
+Bitrate scales with pixel count from a 6 Mbps reference at 1080p, clamped at both ends. What
+this cannot answer without a device is thermal behaviour and sustained write throughput at
+4K, which is what the flag exists to let you measure.
+
 ## 1.2.0 - 2026-08-20
 
 ### Added

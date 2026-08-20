@@ -23,13 +23,18 @@ public struct CameraScreen: View {
         controlTitles: CameraControlTitles,
         onDismiss: @escaping () -> Void,
         onOpenLibrary: CameraLibraryOpener? = nil,
-        previewEngine: CameraPreviewEngine = .system
+        previewEngine: CameraPreviewEngine = .system,
+        recordingEngine: CameraRecordingEngine = .movieFile
     ) {
         self.controlTitles = controlTitles
         self.onOpenLibrary = onOpenLibrary
         self.previewEngine = previewEngine
         _viewModel = State(
-            wrappedValue: CameraViewModel(handler: handler, onDismiss: onDismiss)
+            wrappedValue: CameraViewModel(
+                handler: handler,
+                onDismiss: onDismiss,
+                recordingEngine: recordingEngine
+            )
         )
     }
 

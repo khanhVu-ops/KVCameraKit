@@ -38,17 +38,32 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
     private let sessionQueue = DispatchQueue(label: "com.iosvault.camera.sessionQueue")
 
+    /// Chosen at construction, because it decides which outputs go on the session — see
+    /// `CameraRecordingEngine.usesSampleBuffers`.
+    private let recordingEngine: CameraRecordingEngine
+
     private let photo = PhotoCaptureCoordinator()
     /// Built in `init` rather than lazily, because it needs the session and the queue that
     /// serialises it. Constructing it attaches nothing — see `CameraFrameTap.addConsumer`.
     private var frameTap: FrameSource!
     private let movie = MovieRecordingCoordinator()
     private let audio = CameraAudioSession()
+    /// Only built for the asset-writer engine. The movie-file engine gets its audio from the
+    /// session input, exactly as before.
+    private let audioTap = CameraAudioTap()
+    private let assetWriter = AssetWriterRecorder()
+    /// Held for the duration of a recording, so the frame tap keeps delivering.
+    private var recordingSubscription: FrameSubscription?
+    /// Whether the microphone output is really on the session. False on a simulator, where
+    /// there is no session at all — and the writer needs to know before it creates a track it
+    /// would never fill.
+    private var isAudioTapAttached = false
     private var hardwareControls: CameraHardwareControls!
     private var rotation: CameraRotationController!
     private var observer: CameraSessionObserver!
 
-    override init() {
+    init(recordingEngine: CameraRecordingEngine = .movieFile) {
+        self.recordingEngine = recordingEngine
         super.init()
 
         // Built here rather than at the property, because each needs a callback into
@@ -168,7 +183,18 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             photo.configureOutput()
         }
 
-        if session.canAddOutput(movie.output) {
+        // Deliberately one or the other, never both. `AVCaptureMovieFileOutput` and
+        // `AVCaptureVideoDataOutput` coexisting on a session is a constraint that varies by
+        // device and configuration, and the failure is silent: `canAddOutput` returns `false`
+        // and the frame tap never attaches, so a Metal preview shows black and a scanner
+        // never finds a page with nothing logged anywhere. Attaching only what the chosen
+        // engine needs means that can never happen.
+        if recordingEngine.usesSampleBuffers {
+            if session.canAddOutput(audioTap.output) {
+                session.addOutput(audioTap.output)
+                isAudioTapAttached = true
+            }
+        } else if session.canAddOutput(movie.output) {
             session.addOutput(movie.output)
         }
 
@@ -330,6 +356,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     var frames: any FrameSource { frameTap }
 
     private func applyCaptureRotation(_ angle: CGFloat) {
+        latestCaptureAngle = angle
         // The tap reports this per frame. Same coordinator, same angle as the preview layer —
         // a frame pipeline that derived its own orientation would be a second source of truth
         // for which way is up, and the two would disagree in landscape.
@@ -337,7 +364,11 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
-            for output in [self.photo.output as AVCaptureOutput, self.movie.output as AVCaptureOutput] {
+            var outputs: [AVCaptureOutput] = [self.photo.output]
+            if !self.recordingEngine.usesSampleBuffers {
+                outputs.append(self.movie.output)
+            }
+            for output in outputs {
                 guard let connection = output.connection(with: .video),
                       connection.isVideoRotationAngleSupported(angle) else { continue }
                 connection.videoRotationAngle = angle
@@ -403,17 +434,71 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     }
 
     func startRecording(to outputURL: URL) {
-        #if targetEnvironment(simulator)
-        #else
-        movie.start(to: outputURL, on: sessionQueue)
-        #endif
+        switch recordingEngine {
+        case .movieFile:
+            // Needs a real session, so a simulator can only no-op and hand back a stub on
+            // stop — which is what it did before any of this.
+            #if targetEnvironment(simulator)
+            break
+            #else
+            movie.start(to: outputURL, on: sessionQueue)
+            #endif
+
+        case .assetWriter:
+            // No `#if` here, deliberately. This path takes its video from `FrameSource`, and
+            // that is simulated on a simulator — so unlike every previous recorder, this one
+            // produces a real, playable file on a machine with no camera. Audio is the only
+            // part that cannot be faked, and the writer is told so rather than left to create
+            // a track nothing fills.
+            // The rotation is baked in as a track transform rather than by rotating pixels:
+            // one matrix in the container header instead of a full-frame copy 30 times a
+            // second, and every player honours it.
+            let transform = Self.transform(forCaptureAngle: latestCaptureAngle)
+            assetWriter.start(
+                to: outputURL,
+                transform: transform,
+                includesAudio: isAudioTapAttached
+            )
+
+            audioTap.setConsumer { [weak self] sampleBuffer in
+                self?.assetWriter.appendAudio(sampleBuffer)
+            }
+            // Subscribing is also what attaches the video data output, so a recording holds
+            // the frame stream open for exactly as long as it runs.
+            recordingSubscription = frameTap.addConsumer { [weak self] frame in
+                self?.assetWriter.appendVideo(frame)
+            }
+        }
     }
 
     func stopRecording() async throws -> URL? {
-        #if targetEnvironment(simulator)
-        return SimulatedCapture.video()
-        #else
-        return try await movie.stop(on: sessionQueue)
-        #endif
+        switch recordingEngine {
+        case .movieFile:
+            #if targetEnvironment(simulator)
+            return SimulatedCapture.video()
+            #else
+            return try await movie.stop(on: sessionQueue)
+            #endif
+
+        case .assetWriter:
+            // Unsubscribed *before* finishing, so no sample can arrive after
+            // `markAsFinished` — appending to a finished input is a hard failure that
+            // invalidates the whole file.
+            recordingSubscription?.cancel()
+            recordingSubscription = nil
+            audioTap.setConsumer(nil)
+            return await assetWriter.stop()
+        }
+    }
+
+    /// The most recent horizon-level capture angle, for the writer's track transform.
+    private var latestCaptureAngle: CGFloat = 0
+
+    /// A capture angle in degrees as a track transform.
+    ///
+    /// Static and pure because "the video is sideways" is the classic recorder bug and it
+    /// should not need a device to catch.
+    static func transform(forCaptureAngle angle: CGFloat) -> CGAffineTransform {
+        CGAffineTransform(rotationAngle: angle * .pi / 180)
     }
 }
