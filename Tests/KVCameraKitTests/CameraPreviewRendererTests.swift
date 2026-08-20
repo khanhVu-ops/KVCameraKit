@@ -116,6 +116,88 @@ final class CameraPreviewRendererTests: XCTestCase {
         )
     }
 
+    // MARK: - Which way it turns
+
+    /// The direction of the turn, which is what the tests above are all carefully blind to.
+    ///
+    /// Every other rotation assertion here compares `hypot` or `abs`, so it pins how much the
+    /// quad is scaled and says nothing about which way it went. A quarter turn the wrong way
+    /// is 180° from a quarter turn the right way — an upside-down viewfinder that fills the
+    /// screen correctly, passes every existing test, and can only be seen on a device.
+    ///
+    /// The vertex shader pairs quad corner `(-1, +1)` — clip-space top-left — with texture
+    /// coordinate `(0, 0)`, the image's top-left pixel. So asking where that corner lands is
+    /// asking which way the picture turned. Under the quarter turn that makes a portrait
+    /// phone's landscape buffer upright, the picture rotates clockwise on screen and its
+    /// top-left corner swings to the **top-right**.
+    func test_aQuarterTurnSendsTheImagesTopLeftToTheTopRight() {
+        let matrix = CameraPreviewRenderer.transform(
+            source: CGSize(width: 1920, height: 1080),
+            destination: CGSize(width: 1080, height: 1920),
+            rotationAngle: 90,
+            mirrored: false
+        )
+        let imageTopLeft = mapped(SIMD2<Float>(-1, 1), matrix)
+
+        XCTAssertGreaterThan(imageTopLeft.x, 0, "the picture turned anticlockwise — the preview is 180° out")
+        XCTAssertGreaterThan(imageTopLeft.y, 0, "the picture turned anticlockwise — the preview is 180° out")
+    }
+
+    /// And 270 goes the other way, or the two angles are not opposite turns at all.
+    func test_270SendsItToTheBottomLeftInstead() {
+        let matrix = CameraPreviewRenderer.transform(
+            source: CGSize(width: 1920, height: 1080),
+            destination: CGSize(width: 1080, height: 1920),
+            rotationAngle: 270,
+            mirrored: false
+        )
+        let imageTopLeft = mapped(SIMD2<Float>(-1, 1), matrix)
+
+        XCTAssertLessThan(imageTopLeft.x, 0)
+        XCTAssertLessThan(imageTopLeft.y, 0)
+    }
+
+    /// 180° is a half turn either way, so it is the one angle a sign error cannot show up in —
+    /// which is worth stating, because it is also the symptom a sign error produces.
+    func test_aHalfTurnPutsTheImagesTopLeftAtTheBottomRight() {
+        let matrix = CameraPreviewRenderer.transform(
+            source: CGSize(width: 1000, height: 2000),
+            destination: CGSize(width: 500, height: 1000),
+            rotationAngle: 180,
+            mirrored: false
+        )
+        let imageTopLeft = mapped(SIMD2<Float>(-1, 1), matrix)
+
+        XCTAssertGreaterThan(imageTopLeft.x, 0)
+        XCTAssertLessThan(imageTopLeft.y, 0)
+    }
+
+    /// The angle the preview turns by has to agree with the one baked into the recording.
+    ///
+    /// Both come from the same `RotationCoordinator` angle, and they are applied in coordinate
+    /// spaces whose y axes run opposite ways — the recorder's `CGAffineTransform` in the
+    /// image's y-down space, the preview's matrix in Metal's y-up clip space. So agreeing
+    /// means the two matrices are *mirror images* in y, and this is the assertion that says so
+    /// rather than leaving it to a comment: if someone "fixes" one of them without the other,
+    /// the preview and the file it records disagree about which way is up.
+    func test_thePreviewTurnsTheSameWayTheRecordingIsTagged() {
+        let recorded = CameraService.transform(forCaptureAngle: 90)          // y-down
+        // Square, into a square: a quarter turn of anything else rescales to fill, and the
+        // fill would then be mixed into the terms being compared.
+        let previewed = CameraPreviewRenderer.transform(                     // y-up
+            source: CGSize(width: 1000, height: 1000),
+            destination: CGSize(width: 1000, height: 1000),
+            rotationAngle: 90,
+            mirrored: false
+        )
+
+        // A y-flip conjugation: negating the off-diagonal terms turns one convention into the
+        // other. `recorded.b` is the sine term of a y-down turn; `previewed[0][1]` is the same
+        // term of a y-up one.
+        XCTAssertEqual(Float(recorded.b), -previewed[0][1], accuracy: 0.001)
+        XCTAssertEqual(Float(recorded.c), -previewed[1][0], accuracy: 0.001)
+    }
+
     // MARK: - Mirroring
 
     /// Horizontally, and only horizontally. Mirroring the other axis turns a selfie upside

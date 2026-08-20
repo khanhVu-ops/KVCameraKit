@@ -27,6 +27,19 @@ struct CapturedPhoto: Sendable {
     let fileExtension: String
 }
 
+/// Where the zoom actually is, as opposed to where the screen believes it asked for.
+///
+/// Both numbers, because either alone can lie. `ui` is what the pill shows, so it can be
+/// compared directly with `CameraState.currentZoom`; `device` is the raw `videoZoomFactor`
+/// the ISP is at, which is what the pixels come from. Two readings tell three different
+/// stories: they disagree with the request (the write did not land), they agree with the
+/// request but the picture did not change (the frames are not being cropped), or the pair
+/// disagree with each other (the ladder's base factor is wrong for this hardware).
+struct CameraZoomReading: Equatable, Sendable {
+    let device: CGFloat
+    let ui: CGFloat
+}
+
 /// Where a recording's bytes are going.
 ///
 /// Decided per recording rather than at construction, because it depends on something only
@@ -185,6 +198,14 @@ protocol CameraCapturing: AnyObject, Sendable {
     /// Publishes zoom, exposure and the self-timer to Camera Control. A no-op where the
     /// hardware has no such button.
     func installHardwareControls(labels: CameraControlLabels) async
+
+    /// Where the zoom actually is. `nil` on a machine with no camera.
+    ///
+    /// A diagnostic, and it earns its place in the protocol the same way the frame counter
+    /// earned its place on screen: zoom that silently fails to apply looks exactly like zoom
+    /// that applied, and the difference is only visible on a device — which is the one place
+    /// nobody can attach a debugger to a viewfinder and still be looking at the viewfinder.
+    var zoomReading: CameraZoomReading? { get }
 
     /// Frames off the sensor, for whoever needs pixels rather than a viewfinder.
     ///

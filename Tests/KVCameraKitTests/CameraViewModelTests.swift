@@ -671,6 +671,11 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
     func availableZoomLevels() -> [CGFloat] { zoomLevels }
     func zoomRange() -> ClosedRange<CGFloat> { range }
     func setZoom(factor: CGFloat, animated: Bool) { appliedZoom = factor }
+    /// Reports whatever it was told to apply, which is the honest stand-in: a stub that
+    /// invented a reading would make the one thing this exists to detect untestable.
+    var zoomReading: CameraZoomReading? {
+        appliedZoom.map { CameraZoomReading(device: $0, ui: $0) }
+    }
     func focus(at pointOfInterest: CGPoint, locked: Bool) { didLockFocus = locked }
     func resetFocusAndExposure() { didResetFocus = true }
     func setExposureBias(_ bias: Float) {}

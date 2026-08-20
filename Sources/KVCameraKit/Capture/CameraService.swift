@@ -356,6 +356,19 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
     var isUsingFrontCamera: Bool { currentPosition == .front }
 
+    /// Read straight off the device, off the session queue, on purpose.
+    ///
+    /// Hopping to the queue for a number a diagnostic reads twice a second would serialise it
+    /// behind zoom and capture — and would report the value *after* whatever is queued rather
+    /// than the one on screen now. `videoZoomFactor` is a plain property read; the worst case
+    /// is a reading half a frame stale, which for something being watched by eye is nothing.
+    var zoomReading: CameraZoomReading? {
+        guard let device = activeDevice else { return nil }
+        let factor = device.videoZoomFactor
+        let base = CameraZoomLadder.base(for: device)
+        return CameraZoomReading(device: factor, ui: base > 0 ? factor / base : factor)
+    }
+
     var frames: any FrameSource { frameTap }
 
     private func applyCaptureRotation(_ angle: CGFloat) {

@@ -4,7 +4,38 @@ All notable changes to KVCameraKit are documented in this file.
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- **The Metal viewfinder was upside down on a device.** Both cameras, 180° out, with a
+  perfectly smooth stream — which is what made it look like anything but a rotation that had
+  been applied, and had.
+
+  AVFoundation's rotation angle describes a turn in the *image's* coordinate space, where y
+  runs down — the same convention `CGAffineTransform(rotationAngle:)` uses, which is why the
+  recorder takes the same angle unchanged and tags its files upright. Metal's clip space has
+  y **up**, so the identical angle turned the quad the other way, and a quarter turn the
+  wrong way is 180° from a quarter turn the right way.
+
+  What let it ship is worth more than the fix: every rotation test compared `hypot` or `abs`,
+  so all of them pinned how far the quad was scaled and none of them pinned which way it
+  turned. There are now three that assert direction, plus one that ties the preview's matrix
+  to the recorder's transform — if someone "corrects" one convention without the other, the
+  preview and the file it records disagree about which way is up.
+
+### Added
+
+- **The debug HUD now reports zoom: asked → measured · raw.** Three numbers, because each
+  pair rules out a different story when zoom appears not to respond — the request never
+  reached the lens, the lens moved but the frames are not being cropped, or the ladder's base
+  factor is wrong for this hardware and both UI numbers agree while the lens sits somewhere
+  else. It turns amber when the first two disagree.
+
+  Same reasoning as the frame counter beside it: zoom that silently fails to apply looks
+  exactly like zoom that applied, and only a device can tell you which you have.
+
+  The HUD is two rows now. The readings are monospaced and unbounded, and it spans the top of
+  the narrowest phone the app supports — the mode switcher already ran off the edge of a small
+  screen once for that reason.
 
 ## 1.4.0 - 2026-08-20
 

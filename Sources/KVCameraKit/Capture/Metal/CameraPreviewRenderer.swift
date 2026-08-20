@@ -252,7 +252,22 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     ) -> simd_float4x4 {
         var matrix = matrix_identity_float4x4
 
-        let radians = Float(rotationAngle * .pi / 180)
+        // **Negated**, and this is the whole of a bug that shipped: the preview was upside
+        // down on a device, on both cameras, with a perfectly smooth stream.
+        //
+        // AVFoundation's angle describes the rotation in the *image's* coordinate space,
+        // where y runs **down** — the same convention `CGAffineTransform(rotationAngle:)`
+        // uses, which is why the recorder's track transform takes the angle unchanged and
+        // comes out upright. Metal's clip space has y **up**, so the identical angle turns
+        // the quad the opposite way, and a quarter turn the wrong way is 180° from a quarter
+        // turn the right way. Not a quarter turn *missing* — which is why it looked like a
+        // rotation that had been applied, and had.
+        //
+        // What let it ship is worth more than the fix: every rotation test here compared
+        // `hypot` or `abs`, so all of them pinned how much the quad was scaled and none of
+        // them pinned which way it turned. Direction is now asserted — see
+        // `test_aQuarterTurnSendsTheImagesTopLeftToTheTopRight`.
+        let radians = Float(-rotationAngle * .pi / 180)
         if radians != 0 {
             let cosine = cos(radians)
             let sine = sin(radians)

@@ -304,7 +304,11 @@ struct CameraContentView: View {
                     // builds only — see `CameraFrameStatisticsHUD` for why it is also the
                     // tap's first consumer.
                     #if DEBUG
-                    CameraFrameStatisticsHUD(frames: cameraService.frames)
+                    CameraFrameStatisticsHUD(
+                        frames: cameraService.frames,
+                        requestedZoom: state.currentZoom,
+                        zoomReading: { cameraService.zoomReading }
+                    )
                         .padding(.top, theme.spacingS)
                     #endif
 
