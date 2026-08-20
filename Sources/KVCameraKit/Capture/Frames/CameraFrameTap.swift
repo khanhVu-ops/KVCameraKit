@@ -29,6 +29,9 @@ final class CameraFrameTap: NSObject, FrameSource, @unchecked Sendable {
     private var consumers: [UUID: FrameConsumer] = [:]
     private var accumulator = FrameStatisticsAccumulator()
     private var isAttached = false
+    /// The output was added during the session's initial configuration, so it stays for the
+    /// session's lifetime rather than following subscriptions.
+    private var isPinned = false
 
     /// The session and the queue that owns its configuration, supplied by `CameraService`.
     /// Held rather than passed per call so `addConsumer` can attach without every caller
@@ -103,6 +106,35 @@ final class CameraFrameTap: NSObject, FrameSource, @unchecked Sendable {
 
     // MARK: - Attach / detach
 
+    /// Adds the output up front, as part of the session's **initial** configuration.
+    ///
+    /// Must be called on the session queue, inside `beginConfiguration()`/`commitConfiguration()`,
+    /// before `startRunning()`.
+    ///
+    /// This exists because of what the alternative costs. Attaching on first subscription is
+    /// the right default — a screen that only takes photos should not pay for a video data
+    /// output — but when the *preview* is the first subscriber, that subscription happens a
+    /// moment after the session is already running, and adding an output to a running session
+    /// is not a cheap edit: AVFoundation rebuilds the capture pipeline, and on a 48 MP sensor
+    /// with zero-shutter-lag and responsive capture enabled that rebuild takes **seconds**.
+    /// Every tap on the shutter and every zoom is serialised behind it on this queue, which is
+    /// what "the first capture took five seconds" was.
+    ///
+    /// Added before the session starts, the same output costs nothing measurable.
+    func pin(to session: AVCaptureSession) {
+        lock.lock()
+        let alreadyAttached = isAttached
+        lock.unlock()
+        guard !alreadyAttached, session.canAddOutput(output) else { return }
+
+        session.addOutput(output)
+
+        lock.lock()
+        isAttached = true
+        isPinned = true
+        lock.unlock()
+    }
+
     private func attach() {
         sessionQueue.async { [weak self] in
             guard let self = self, let session = self.session else { return }
@@ -139,9 +171,13 @@ final class CameraFrameTap: NSObject, FrameSource, @unchecked Sendable {
             // to detach and this block running, and tearing the output down under it would
             // leave a subscriber that never receives a frame.
             let hasConsumers = !self.consumers.isEmpty
+            // A pinned output is part of the session's configuration, not a subscription's
+            // resource. Removing it would hand back the same seconds-long pipeline rebuild
+            // that pinning exists to avoid, the next time anything subscribed.
+            let isPinned = self.isPinned
             self.lock.unlock()
 
-            guard wasAttached, !hasConsumers else { return }
+            guard wasAttached, !hasConsumers, !isPinned else { return }
 
             session.beginConfiguration()
             session.removeOutput(self.output)

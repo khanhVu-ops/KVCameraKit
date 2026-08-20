@@ -170,14 +170,21 @@ final class CameraViewModel {
         handler: any CameraArtifactHandler,
         onDismiss: @escaping () -> Void,
         cameraService: (any CameraCapturing)? = nil,
-        recordingEngine: CameraRecordingEngine = .movieFile
+        recordingEngine: CameraRecordingEngine = .movieFile,
+        previewEngine: CameraPreviewEngine = .system
     ) {
         self.handler = handler
         self.onDismiss = onDismiss
         self.recordingEngine = recordingEngine
         // The engine reaches the service at construction because it decides which outputs go
         // on the session, which cannot be changed once a recording is in flight.
-        self.cameraService = cameraService ?? CameraService(recordingEngine: recordingEngine)
+        self.cameraService = cameraService ?? CameraService(
+            recordingEngine: recordingEngine,
+            // The engine reaches the service for the same reason the recording one does: it
+            // decides which outputs belong in the session's *first* configuration, and adding
+            // them later — to a running session — is a pipeline rebuild.
+            previewEngine: previewEngine
+        )
     }
 
     func send(_ action: Action) {

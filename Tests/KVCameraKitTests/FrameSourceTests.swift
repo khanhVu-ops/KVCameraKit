@@ -190,6 +190,63 @@ final class FrameSourceTests: XCTestCase {
 
     /// Drives the delegate method AVFoundation would call, so the fan-out is exercised without
     /// a session that could deliver anything.
+    // MARK: - Pinning the output
+
+    /// A pinned output goes on during the session's own configuration and stays there.
+    ///
+    /// The cost this avoids is not theoretical: attaching on first subscription means adding an
+    /// output to an already-running session, which rebuilds the capture pipeline. On a device
+    /// that took seconds, and every shutter tap and zoom sat behind it on the session queue —
+    /// reported as "the first capture took five seconds".
+    func test_aPinnedOutputIsAddedDuringConfigurationAndSurvivesItsLastConsumer() async throws {
+        let session = AVCaptureSession()
+        let tap = CameraFrameTap(session: session, sessionQueue: DispatchQueue(label: "test.session"))
+
+        session.beginConfiguration()
+        tap.pin(to: session)
+        session.commitConfiguration()
+
+        XCTAssertEqual(session.outputs.count, 1, "the output belongs on the session before it starts")
+
+        // A subscription comes and goes; the output must not follow it, or the next subscriber
+        // pays the rebuild all over again.
+        let subscription = tap.addConsumer { _ in }
+        subscription.cancel()
+
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertEqual(session.outputs.count, 1, "a pinned output was torn down with its consumer")
+    }
+
+    /// Without pinning, the output still follows subscriptions — a screen that only takes
+    /// photos must not pay for a video data output it never reads.
+    func test_anUnpinnedOutputStillFollowsItsConsumers() async throws {
+        let session = AVCaptureSession()
+        let tap = CameraFrameTap(session: session, sessionQueue: DispatchQueue(label: "test.session"))
+
+        XCTAssertEqual(session.outputs.count, 0)
+
+        let subscription = tap.addConsumer { _ in }
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertEqual(session.outputs.count, 1)
+
+        subscription.cancel()
+        try await Task.sleep(for: .milliseconds(120))
+        XCTAssertEqual(session.outputs.count, 0, "an unpinned output outlived its only consumer")
+    }
+
+    /// Pinning twice, or pinning something already attached, must not add a second output.
+    func test_pinningIsIdempotent() {
+        let session = AVCaptureSession()
+        let tap = CameraFrameTap(session: session, sessionQueue: DispatchQueue(label: "test.session"))
+
+        session.beginConfiguration()
+        tap.pin(to: session)
+        tap.pin(to: session)
+        session.commitConfiguration()
+
+        XCTAssertEqual(session.outputs.count, 1)
+    }
+
     private func deliver(frames count: Int, to tap: CameraFrameTap) throws {
         let output = AVCaptureVideoDataOutput()
         let connection = AVCaptureConnection(inputPorts: [], output: output)

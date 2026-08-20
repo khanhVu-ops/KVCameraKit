@@ -21,12 +21,18 @@ final class PhotoCaptureCoordinator: NSObject, @unchecked Sendable {
     /// `makeSettings` stays `.balanced`, which is what Camera.app uses: `.quality`
     /// on every frame adds shutter latency the animation then has to hide.
     ///
+    /// And the ceiling is `.balanced` too, matching it. Raising the ceiling is not free: the
+    /// output allocates for the level it is told it may be asked for, so a ceiling of
+    /// `.quality` bought a deeper pipeline and a slower first capture in exchange for a
+    /// quality level no shot here ever requests. It was set to `.quality` while fixing the
+    /// no-op above, which is how a ceiling ends up disagreeing with every actual use of it.
+    ///
     /// Zero-shutter-lag and responsive capture are the reason a modern iPhone returns a
     /// frame in tens of milliseconds instead of hundreds, and they are the cheapest
     /// possible win for how immediate the capture feels. They must be enabled in this
     /// order: zero shutter lag, then responsive capture, then fast prioritization.
     func configureOutput() {
-        output.maxPhotoQualityPrioritization = .quality
+        output.maxPhotoQualityPrioritization = .balanced
 
         if output.isZeroShutterLagSupported {
             output.isZeroShutterLagEnabled = true

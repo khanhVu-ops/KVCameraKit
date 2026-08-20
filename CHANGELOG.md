@@ -6,6 +6,40 @@ All notable changes to KVCameraKit are documented in this file.
 
 ### Fixed
 
+- **The first capture or zoom on the camera screen took seconds.** The preview came up, and
+  then nothing responded for about five.
+
+  `CameraFrameTap` attaches its `AVCaptureVideoDataOutput` on first subscription, which is the
+  right default — a screen that only takes photos should not pay for an output it never reads.
+  But with the Metal preview the *preview itself* is that first subscriber, and it subscribes a
+  moment after the session is already running. Adding an output to a running session is not a
+  cheap edit: AVFoundation rebuilds the capture pipeline, and with a 48 MP sensor,
+  zero-shutter-lag and responsive capture that rebuild takes seconds — during which every
+  shutter tap and every zoom sits behind it on the session queue.
+
+  Anything certain to want frames now gets its output during the session's *first*
+  configuration, before it starts running, where the same output costs nothing measurable.
+  `CameraFrameTap.pin(to:)`, driven by `CameraPreviewEngine.needsFrames` and
+  `CameraRecordingEngine.usesSampleBuffers`, and a pinned output is not torn down when its last
+  consumer leaves.
+
+- **`AVCaptureDevice` is no longer read from the main actor.** `availableZoomLevels()`,
+  `zoomRange()` and the HUD's zoom reading each took a device property lock that the session
+  queue also holds while reconfiguring — from the thread that draws, at exactly the moment the
+  session is being built. The ladder is read once on the session queue where the device changes
+  hands and cached; a diagnostic that measures stalls must not cause them.
+
+- **`maxPhotoQualityPrioritization` no longer asks for more than any shot uses.** It was
+  `.quality` while every capture requests `.balanced`. The ceiling is not free — the output
+  allocates for the level it is told it may be asked for — so that bought a deeper pipeline and
+  a slower first capture in exchange for a quality level nothing here requests.
+
+- **A slow capture no longer shows a black screen.** The shutter curtain was
+  `captureStage == .exposing ? 1 : 0`, tying an opaque black overlay to however long the sensor
+  took: correct for the tens of milliseconds it exists to cover, and a black screen for
+  anything longer. It is a blink now — closes, holds, opens, on its own clock — and the card
+  still flies whenever the frame actually lands. A failed capture no longer leaves it up either.
+
 - **Zoom did nothing for the first second on the camera screen.** Bringing a session up on a
   phone takes the better part of a second and the screen is interactive throughout, so every
   zoom in that window hit `guard let device = activeDevice else { return }` and vanished —

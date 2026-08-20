@@ -33,7 +33,8 @@ public struct CameraScreen: View {
             wrappedValue: CameraViewModel(
                 handler: handler,
                 onDismiss: onDismiss,
-                recordingEngine: recordingEngine
+                recordingEngine: recordingEngine,
+                previewEngine: previewEngine
             )
         )
     }
@@ -135,6 +136,8 @@ struct CameraContentView: View {
     @State private var currentPinchZoom: CGFloat = 1.0
     @State private var flipRotationDegrees: Double = 0
     @State private var viewfinderReveal: Double = 0
+    @State private var curtainBlink: Double = 0
+    @State private var blinkTask: Task<Void, Never>?
     @State private var thumbnailScale: CGFloat = 1.0
     @State private var bounceTask: Task<Void, Never>?
 
@@ -245,7 +248,6 @@ struct CameraContentView: View {
                     .opacity(curtainOpacity)
                     .ignoresSafeArea()
                     .allowsHitTesting(false)
-                    .animation(curtainAnimation, value: state.captureStage)
 
                 // 3. The scanner's page outline.
                 //
@@ -391,6 +393,9 @@ struct CameraContentView: View {
             onScenePhaseChanged(phase == .active)
         }
         .onChange(of: state.captureStage) { stage in
+            if case .exposing = stage {
+                blinkCurtain()
+            }
             guard case .flying = stage else { return }
             scheduleThumbnailBounce()
         }
@@ -406,16 +411,32 @@ struct CameraContentView: View {
 
     // MARK: - Capture choreography
 
-    private var curtainOpacity: Double {
-        state.captureStage == .exposing ? 1.0 : 0.0
-    }
+    /// Driven by its own animation rather than by how long the sensor takes.
+    ///
+    /// It used to be `captureStage == .exposing ? 1 : 0`, which tied an opaque black overlay
+    /// to the duration of the capture — fine at the tens of milliseconds the curtain exists to
+    /// cover, and a **black screen** the moment a capture takes longer, which is exactly what
+    /// was reported. A shutter is a blink: it closes and opens on its own clock, and if the
+    /// frame is late the user waits looking at the live viewfinder, which is the honest thing
+    /// to show. The card still flies whenever the frame actually lands.
+    private var curtainOpacity: Double { curtainBlink }
 
     /// Down fast, up slow: the drop is feedback and has to beat the eye, the lift is
     /// scenery and reads better behind the card.
-    private var curtainAnimation: Animation {
-        state.captureStage == .exposing
-            ? .easeOut(duration: CaptureFlightTiming.curtainDown)
-            : .easeIn(duration: CaptureFlightTiming.curtainLift)
+    /// Closes fast, holds for a frame or two, opens. Total: under a third of a second,
+    /// whatever the sensor is doing.
+    private func blinkCurtain() {
+        blinkTask?.cancel()
+        blinkTask = Task { @MainActor in
+            withAnimation(.easeOut(duration: CaptureFlightTiming.curtainDown)) {
+                curtainBlink = 1
+            }
+            try? await Task.sleep(for: .milliseconds(90))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeIn(duration: CaptureFlightTiming.curtainLift)) {
+                curtainBlink = 0
+            }
+        }
     }
 
     /// Scheduled from the shared timeline rather than guessed, so the bounce happens on

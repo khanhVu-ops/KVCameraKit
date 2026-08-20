@@ -41,6 +41,10 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     /// Chosen at construction, because it decides which outputs go on the session — see
     /// `CameraRecordingEngine.usesSampleBuffers`.
     private let recordingEngine: CameraRecordingEngine
+    /// Also chosen at construction, and for the same reason: a Metal preview subscribes to
+    /// frames the instant it appears, so its output belongs in the session's first
+    /// configuration rather than in a rebuild a moment later. See `CameraFrameTap.pin(to:)`.
+    private let previewEngine: CameraPreviewEngine
 
     private let photo = PhotoCaptureCoordinator()
     /// Built in `init` rather than lazily, because it needs the session and the queue that
@@ -65,8 +69,12 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     private var rotation: CameraRotationController!
     private var observer: CameraSessionObserver!
 
-    init(recordingEngine: CameraRecordingEngine = .movieFile) {
+    init(
+        recordingEngine: CameraRecordingEngine = .movieFile,
+        previewEngine: CameraPreviewEngine = .system
+    ) {
         self.recordingEngine = recordingEngine
+        self.previewEngine = previewEngine
         super.init()
 
         // Built here rather than at the property, because each needs a callback into
@@ -201,9 +209,21 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             session.addOutput(movie.output)
         }
 
+        // Anything that will certainly want frames gets its output here, while the session is
+        // still being built. A Metal preview subscribes as soon as it appears and an
+        // asset-writer recording subscribes on the first tap, and either way adding the output
+        // *later* — to a running session — is a pipeline rebuild that blocks this queue for
+        // seconds, with every shutter tap and zoom queued behind it.
+        if previewEngine.needsFrames || recordingEngine.usesSampleBuffers {
+            (frameTap as? CameraFrameTap)?.pin(to: session)
+        }
+
         session.commitConfiguration()
         session.startRunning()
         isSessionStarted = session.isRunning
+
+        // Read once, here, on this queue — not later from the main actor.
+        refreshZoomCache(for: device)
 
         // Whatever the screen last asked for — 1× if nobody has touched it, and the factor
         // the user picked while the session was still coming up if they did.
@@ -266,6 +286,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         // with it, or the next session rebuild would resurrect a factor the screen no longer
         // shows.
         requestedZoomFactor = 1.0
+        refreshZoomCache(for: newDevice)
         applyZoom(to: newDevice, uiFactor: 1.0, animated: false)
     }
 
@@ -290,12 +311,29 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
     // MARK: - Zoom
 
+    /// The ladder, read once on the session queue and cached.
+    ///
+    /// Not read on demand, and that is a deliberate change: these are called from the main
+    /// actor, and every `AVCaptureDevice` property read takes a lock the session queue also
+    /// holds while it reconfigures. Reading them at exactly the moment the session is being
+    /// built — which is when the screen asks — is a main-thread stall measured in seconds, and
+    /// a frozen UI is indistinguishable from "the first tap did nothing".
+    ///
+    /// The ladder only changes when the device does, so there is nothing to lose by caching:
+    /// it is refreshed where the device changes hands, in `configureSessionLocked` and
+    /// `swapCameraLocked`.
+    private let zoomCacheLock = NSLock()
+    private var cachedZoomLevels: [CGFloat] = []
+    private var cachedZoomRange: ClosedRange<CGFloat> = 1.0...1.0
+    private var cachedZoomReading: CameraZoomReading?
+
     func availableZoomLevels() -> [CGFloat] {
         #if targetEnvironment(simulator)
         return SimulatedCapture.zoomLevels
         #else
-        guard let device = activeDevice else { return [] }
-        return CameraZoomLadder.levels(for: device)
+        zoomCacheLock.lock()
+        defer { zoomCacheLock.unlock() }
+        return cachedZoomLevels
         #endif
     }
 
@@ -303,9 +341,33 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         #if targetEnvironment(simulator)
         return SimulatedCapture.zoomRange
         #else
-        guard let device = activeDevice else { return 1.0...1.0 }
-        return CameraZoomLadder.range(for: device)
+        zoomCacheLock.lock()
+        defer { zoomCacheLock.unlock() }
+        return cachedZoomRange
         #endif
+    }
+
+    /// Session queue only. Re-reads everything the ladder depends on, in one place.
+    private func refreshZoomCache(for device: AVCaptureDevice?) {
+        guard let device else {
+            zoomCacheLock.lock()
+            cachedZoomLevels = []
+            cachedZoomRange = 1.0...1.0
+            cachedZoomReading = nil
+            zoomCacheLock.unlock()
+            return
+        }
+
+        let levels = CameraZoomLadder.levels(for: device)
+        let range = CameraZoomLadder.range(for: device)
+        let factor = device.videoZoomFactor
+        let base = CameraZoomLadder.base(for: device)
+
+        zoomCacheLock.lock()
+        cachedZoomLevels = levels
+        cachedZoomRange = range
+        cachedZoomReading = CameraZoomReading(device: factor, ui: base > 0 ? factor / base : factor)
+        zoomCacheLock.unlock()
     }
 
     func setZoom(factor: CGFloat, animated: Bool = true) {
@@ -333,6 +395,13 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     private func applyZoom(to device: AVCaptureDevice, uiFactor: CGFloat, animated: Bool) {
         device.applyZoom(uiFactor: uiFactor, animated: animated)
         hardwareControls.syncSelectedLens(for: device)
+        // Cached here so the HUD can report where the lens actually went without touching the
+        // device from the thread that draws.
+        let base = CameraZoomLadder.base(for: device)
+        let factor = device.videoZoomFactor
+        zoomCacheLock.lock()
+        cachedZoomReading = CameraZoomReading(device: factor, ui: base > 0 ? factor / base : factor)
+        zoomCacheLock.unlock()
     }
 
     // MARK: - Focus & exposure
@@ -374,17 +443,16 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
     var isUsingFrontCamera: Bool { currentPosition == .front }
 
-    /// Read straight off the device, off the session queue, on purpose.
+    /// The cached reading, refreshed on the session queue every time zoom is applied.
     ///
-    /// Hopping to the queue for a number a diagnostic reads twice a second would serialise it
-    /// behind zoom and capture — and would report the value *after* whatever is queued rather
-    /// than the one on screen now. `videoZoomFactor` is a plain property read; the worst case
-    /// is a reading half a frame stale, which for something being watched by eye is nothing.
+    /// It used to read `videoZoomFactor` straight off the device on whatever thread asked —
+    /// which for a diagnostic polled twice a second from the main actor meant twice a second
+    /// of contending with the session queue for the device's own lock. A HUD that measures
+    /// stalls must not cause them.
     var zoomReading: CameraZoomReading? {
-        guard let device = activeDevice else { return nil }
-        let factor = device.videoZoomFactor
-        let base = CameraZoomLadder.base(for: device)
-        return CameraZoomReading(device: factor, ui: base > 0 ? factor / base : factor)
+        zoomCacheLock.lock()
+        defer { zoomCacheLock.unlock() }
+        return cachedZoomReading
     }
 
     var frames: any FrameSource { frameTap }
