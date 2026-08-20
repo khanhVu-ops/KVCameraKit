@@ -17,3 +17,11 @@
 "SCAN" = "QUÉT";
 "Position the document in frame" = "Đặt tài liệu vào trong khung";
 "Could not read the document" = "Không đọc được tài liệu";
+
+/* Filter names. Short by design: they sit on a chip in a strip across the
+   bottom of the viewfinder, and a long one scrolls the strip. */
+"Original" = "Gốc";
+"Vivid" = "Rực rỡ";
+"Warm" = "Ấm";
+"Cool" = "Lạnh";
+"Mono" = "Đơn sắc";

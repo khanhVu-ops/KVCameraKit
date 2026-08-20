@@ -43,12 +43,29 @@ vertex VertexOut cameraPreviewVertex(
     return out;
 }
 
+/// The look, as one matrix.
+///
+/// Every adjustment the tone stage offers — exposure, white balance, saturation, contrast — is
+/// affine in RGB, so all four arrive here already composed. That is what keeps the preview and
+/// the captured still honest about each other: the same matrix is handed to Core Image for the
+/// photo, so there is one definition of the look rather than a shader and a filter stack that
+/// drift apart one adjustment at a time.
+///
+/// Applied to gamma-encoded values, deliberately: that is what the texture holds, and the
+/// still path is told not to colour-manage for the same reason. Doing the matrix in linear
+/// light would be more defensible photographically and would need *both* sides converted, or
+/// the photo comes out different from the viewfinder.
+static inline float3 applyTone(float3 rgb, float4x4 tone) {
+    return saturate((tone * float4(rgb, 1.0)).rgb);
+}
+
 fragment float4 cameraPreviewFragmentBGRA(
     VertexOut in [[stage_in]],
-    texture2d<float> source [[texture(0)]]
+    texture2d<float> source [[texture(0)]],
+    constant float4x4 &tone [[buffer(0)]]
 ) {
     constexpr sampler bilinear(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
-    return float4(source.sample(bilinear, in.texCoord).rgb, 1.0);
+    return float4(applyTone(source.sample(bilinear, in.texCoord).rgb, tone), 1.0);
 }
 
 /// Full-range BT.709 YCbCr → RGB.
@@ -62,7 +79,8 @@ fragment float4 cameraPreviewFragmentYCbCr(
     texture2d<float> luma [[texture(0)]],
     texture2d<float> chroma [[texture(1)]],
     constant float3x3 &conversion [[buffer(0)]],
-    constant float3 &offset [[buffer(1)]]
+    constant float3 &offset [[buffer(1)]],
+    constant float4x4 &tone [[buffer(2)]]
 ) {
     constexpr sampler bilinear(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
 
@@ -70,5 +88,8 @@ fragment float4 cameraPreviewFragmentYCbCr(
         luma.sample(bilinear, in.texCoord).r,
         chroma.sample(bilinear, in.texCoord).rg
     );
-    return float4(conversion * (ycbcr - offset), 1.0);
+    // Tone comes *after* the colour conversion, so it operates on RGB in both paths — the
+    // same numbers the still gets. A matrix applied to YCbCr instead would be a different
+    // filter on a device than on anything delivering BGRA.
+    return float4(applyTone(conversion * (ycbcr - offset), tone), 1.0);
 }

@@ -72,4 +72,19 @@ public enum CameraMode: String, CaseIterable, Equatable, Sendable {
         case .photo, .scan: return false
         }
     }
+    /// Whether a look may be applied in this mode.
+    ///
+    /// Photo only, and the reason is parity rather than taste. A filter is applied to the
+    /// preview by the Metal renderer and baked into the still by the same matrix, so both
+    /// agree — but a **recording** on the default engine is produced by
+    /// `AVCaptureMovieFileOutput`, which never lets the app touch a byte. A filtered
+    /// viewfinder there would promise a look the file cannot carry, and a scan wants its tone
+    /// left alone: a warmed-up receipt is a receipt somebody adjusted.
+    var supportsFilters: Bool {
+        switch self {
+        case .photo:            return true
+        case .video, .scan:     return false
+        }
+    }
+
 }

@@ -17,3 +17,11 @@
 "SCAN" = "PINDAI";
 "Position the document in frame" = "Posisikan dokumen dalam bingkai";
 "Could not read the document" = "Tidak dapat membaca dokumen";
+
+/* Filter names. Short by design: they sit on a chip in a strip across the
+   bottom of the viewfinder, and a long one scrolls the strip. */
+"Original" = "Asli";
+"Vivid" = "Cerah";
+"Warm" = "Hangat";
+"Cool" = "Sejuk";
+"Mono" = "Mono";

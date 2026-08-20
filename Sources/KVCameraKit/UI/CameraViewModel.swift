@@ -54,6 +54,11 @@ struct CameraState: Equatable, Sendable {
     /// does not clamp.
     var zoomRange: ClosedRange<CGFloat>?
     var isGridEnabled: Bool = false
+    /// The look being applied. Photo mode only — see `CameraMode.supportsFilters`.
+    var filter: CameraFilter = .original
+    /// The filter strip is open. State rather than a `@State` flag in the view, for the same
+    /// reason the timer menu is: picking a filter closes it in the same update.
+    var isFilterPickerOpen: Bool = false
     var timerDelaySeconds: Int = 0
     /// The delay menu is open. State, not a `@State` flag in the view: closing it happens
     /// in the same update as choosing a delay, and a local flag written next to a
@@ -116,6 +121,8 @@ final class CameraViewModel {
         case toggleTimerMenu
         case setTimerDelay(Int)
         case setZoom(CGFloat, animated: Bool)
+        case toggleFilterPicker
+        case setFilter(CameraFilter)
         case focusAt(devicePoint: CGPoint, viewPoint: CGPoint, locked: Bool)
         case clearFocusLock
         case setExposureBias(Float)
@@ -259,6 +266,14 @@ final class CameraViewModel {
         case .setMode(let mode):
             guard !state.isRecording, mode != state.mode else { return }
             state.mode = mode
+            // A mode that cannot carry the look loses it, rather than showing a filtered
+            // viewfinder over a file that will not have it. Video on the default engine never
+            // passes through this app at all, and a warmed-up scan is a document somebody
+            // adjusted.
+            if !mode.supportsFilters {
+                state.filter = .original
+                state.isFilterPickerOpen = false
+            }
             if mode.isContinuousCapture {
                 state.isTorchOn = false
             }
@@ -299,6 +314,16 @@ final class CameraViewModel {
             if seconds == 0 {
                 stopCountdown()
             }
+            CameraHaptic.selection.play()
+
+        case .toggleFilterPicker:
+            state.isFilterPickerOpen.toggle()
+            CameraHaptic.selection.play()
+
+        case .setFilter(let filter):
+            guard state.mode.supportsFilters else { return }
+            state.filter = filter
+            state.isFilterPickerOpen = false
             CameraHaptic.selection.play()
 
         case .setZoom(let factor, let animated):
@@ -457,15 +482,40 @@ final class CameraViewModel {
                     return
                 }
 
+                // The look is baked in here, off the main actor, from the same matrix the
+                // viewfinder drew with. The *preview* is filtered too — it is what the flight
+                // card flies, and a card that does not match the photo it represents is the
+                // one frame of feedback the user gets telling them the wrong thing.
+                let tone = state.filter.tone
+                let filtered = await Task.detached(priority: .userInitiated) {
+                    (
+                        full: StillToneRenderer.apply(tone, to: shot.data),
+                        preview: shot.preview.flatMap { StillToneRenderer.apply(tone, to: $0) }
+                    )
+                }.value
+
+                guard let full = filtered.full else {
+                    // Refused rather than stored unfiltered: a photo that silently ignores the
+                    // look the user picked is worse than one that says it failed.
+                    state.captureStage = .idle
+                    state.isSealing = false
+                    state.alert = CameraAlert(
+                        title: .cameraKit("Error"),
+                        message: .cameraKit("Photo could not be saved")
+                    )
+                    CameraHaptic.error.play()
+                    return
+                }
+
                 let artifact = CaptureArtifact(
                     kind: .photo,
-                    data: shot.data,
-                    fileExtension: shot.fileExtension,
-                    previewData: shot.preview
+                    data: full.data,
+                    fileExtension: full.fileExtension,
+                    previewData: filtered.preview?.data
                 )
                 // `preview` is a ~1 MP frame from the same capture, so the card is sharp
                 // without waiting for encryption.
-                try await seal(artifact, flying: shot.preview ?? shot.data)
+                try await seal(artifact, flying: filtered.preview?.data ?? full.data)
             } catch {
                 // A capture already in the air is left to land; only the seal failed.
                 if state.captureStage == .exposing {

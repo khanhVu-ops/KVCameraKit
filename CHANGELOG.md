@@ -4,6 +4,40 @@ All notable changes to KVCameraKit are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- **Filters — the tone stage.** A strip of looks (Original · Vivid · Warm · Cool · Mono)
+  behind a button in the top bar, applied live to the viewfinder and baked into the photo.
+
+  This is what the Metal preview was built for. `AVCaptureVideoPreviewLayer` renders the
+  session straight into a `CALayer` with nothing able to sit in front of it, so on the system
+  engine a filter is not slow — it is impossible. The button only appears where the look can be
+  drawn *and* honoured.
+
+  The design decision worth knowing: **the look is one 4×4 matrix, and both paths use it.**
+  Exposure, white balance, saturation and contrast are each affine in RGB, so all four compose
+  into a single matrix built in `CameraTone`. The shader multiplies by it; `CIColorMatrix`
+  multiplies the still by it. The alternative — a fragment shader for the preview and a stack of
+  `CIColorControls`/`CITemperatureAndTint` for the photo — looks identical on the day it is
+  written and drifts one adjustment at a time, and the symptom is a photo that does not match
+  the viewfinder it was composed in. There is a test that pushes a known colour through the
+  real still path and compares it against the matrix arithmetic.
+
+  Two details that make that parity real rather than nominal. The still context works with
+  `workingColorSpace: NSNull()`, so the matrix multiplies the same gamma-encoded values the
+  shader does — Core Image's default is to convert to linear light first, which is more
+  defensible photographically and would silently make every photo differ from its preview. And
+  a filtered photo comes back as JPEG whatever went in, with the extension reported, because
+  filtering is a re-encode; a neutral look returns the original bytes untouched rather than
+  paying a generation of JPEG loss to multiply by an identity matrix.
+
+  **Photo mode only**, which is a correctness rule rather than a limitation: a recording on the
+  default engine is produced by `AVCaptureMovieFileOutput` and never passes through this app,
+  so a filtered viewfinder there would promise a look the file cannot carry. Leaving photo mode
+  clears the look rather than showing it over a file that will not have it. Filtered *recording*
+  is the next increment, and it needs the renderer to draw into a pixel buffer rather than only
+  into a drawable.
+
 ### Fixed
 
 - **The first capture or zoom on the camera screen took seconds.** The preview came up, and

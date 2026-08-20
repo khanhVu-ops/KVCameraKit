@@ -17,3 +17,11 @@
 "SCAN" = "स्कैन";
 "Position the document in frame" = "दस्तावेज़ को फ़्रेम में रखें";
 "Could not read the document" = "दस्तावेज़ पढ़ा नहीं जा सका";
+
+/* Filter names. Short by design: they sit on a chip in a strip across the
+   bottom of the viewfinder, and a long one scrolls the strip. */
+"Original" = "मूल";
+"Vivid" = "चटख";
+"Warm" = "गर्म";
+"Cool" = "ठंडा";
+"Mono" = "मोनो";

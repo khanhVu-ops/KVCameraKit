@@ -85,6 +85,14 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     /// `CaptureRotation.previewAngle(for:)`.
     var previewRotationAngle: CGFloat = 90
 
+    /// The look, already composed into one matrix. Set from the screen when the user picks a
+    /// filter; read once per frame.
+    ///
+    /// Held as the matrix rather than as a `CameraTone` so the per-frame path does no
+    /// arithmetic, and so the *same value* can be handed to the still renderer — one look, two
+    /// destinations, no second implementation to drift.
+    var toneMatrix: simd_float4x4 = matrix_identity_float4x4
+
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
               let commandQueue = device.makeCommandQueue() else { return nil }
@@ -223,10 +231,13 @@ final class CameraPreviewRenderer: @unchecked Sendable {
             mirrored: isMirrored
         )
 
+        var tone = toneMatrix
+
         switch frame.format {
         case .bgra:
             encoder.setRenderPipelineState(bgraPipeline)
             encoder.setFragmentTexture(frame.textures[0], index: 0)
+            encoder.setFragmentBytes(&tone, length: MemoryLayout<simd_float4x4>.size, index: 0)
 
         case .ycbcr(let isFullRange):
             encoder.setRenderPipelineState(ycbcrPipeline)
@@ -236,6 +247,7 @@ final class CameraPreviewRenderer: @unchecked Sendable {
             var offset = Self.ycbcrOffset(isFullRange: isFullRange)
             encoder.setFragmentBytes(&conversion, length: MemoryLayout<simd_float3x3>.size, index: 0)
             encoder.setFragmentBytes(&offset, length: MemoryLayout<simd_float3>.size, index: 1)
+            encoder.setFragmentBytes(&tone, length: MemoryLayout<simd_float4x4>.size, index: 2)
         }
 
         encoder.setVertexBytes(&transform, length: MemoryLayout<simd_float4x4>.size, index: 0)

@@ -53,6 +53,8 @@ public struct CameraScreen: View {
             onToggleTimerMenu: { viewModel.send(.toggleTimerMenu) },
             onSetTimerDelay: { viewModel.send(.setTimerDelay($0)) },
             onSelectZoom: { factor, animated in viewModel.send(.setZoom(factor, animated: animated)) },
+            onToggleFilterPicker: { viewModel.send(.toggleFilterPicker) },
+            onSelectFilter: { viewModel.send(.setFilter($0)) },
             onTapToFocus: { devPoint, viewPoint, locked in
                 viewModel.send(.focusAt(devicePoint: devPoint, viewPoint: viewPoint, locked: locked))
             },
@@ -117,6 +119,8 @@ struct CameraContentView: View {
     let onToggleTimerMenu: () -> Void
     let onSetTimerDelay: (Int) -> Void
     let onSelectZoom: (CGFloat, Bool) -> Void
+    let onToggleFilterPicker: () -> Void
+    let onSelectFilter: (CameraFilter) -> Void
     let onTapToFocus: (CGPoint, CGPoint, Bool) -> Void
     let onClearFocusLock: () -> Void
     let onOpenLibrary: CameraLibraryOpener?
@@ -183,6 +187,7 @@ struct CameraContentView: View {
                             MetalCameraPreviewView(
                                 frames: cameraService.frames,
                                 isMirrored: state.isUsingFrontCamera,
+                                tone: state.filter.tone,
                                 onTapToFocus: { devicePoint, viewPoint, locked in
                                     localFocusPoint = viewPoint
                                     onTapToFocus(devicePoint, viewPoint, locked)
@@ -524,6 +529,7 @@ struct CameraContentView: View {
             }
 
             timerButton
+            filterButton
 
             Spacer()
 
@@ -539,6 +545,38 @@ struct CameraContentView: View {
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.75), value: state.mode)
+    }
+
+    /// Only where the look can actually be honoured: photo mode, and a preview that can draw
+    /// it.
+    ///
+    /// `AVCaptureVideoPreviewLayer` renders the session straight into a `CALayer` with nothing
+    /// able to sit in front of it, so on the system engine there is no way to show a filter —
+    /// and offering one would mean a photo that differs from the viewfinder it was composed
+    /// in. This is the feature the Metal preview was built for, and the button appearing is
+    /// what that flag finally buys.
+    private var canFilter: Bool {
+        state.mode.supportsFilters && previewEngine.needsFrames
+    }
+
+    @ViewBuilder
+    private var filterButton: some View {
+        if canFilter {
+            Button {
+                onToggleFilterPicker()
+            } label: {
+                Image(systemName: state.filter.id == CameraFilter.original.id
+                      ? "camera.filters"
+                      : "camera.filters")
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(state.filter.id == CameraFilter.original.id
+                                     ? Color.white.opacity(0.8)
+                                     : Color.yellow)
+                    .frame(width: Self.topBarButtonSide, height: Self.topBarButtonSide)
+                    .background(glassCircleBackground)
+            }
+            .transition(.scale.combined(with: .opacity))
+        }
     }
 
     /// Tap to open, tap an option to choose.
@@ -684,6 +722,16 @@ struct CameraContentView: View {
 
     private var bottomControls: some View {
         VStack(spacing: theme.spacingS) {
+            // 0. The filter strip, when it is open.
+            if canFilter && state.isFilterPickerOpen {
+                CameraFilterPicker(
+                    filters: CameraFilter.all,
+                    selectedID: state.filter.id,
+                    onSelect: onSelectFilter
+                )
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             // 1. Zoom Picker Pill
             CameraZoomPicker(
                 levels: state.zoomLevels,
@@ -699,7 +747,8 @@ struct CameraContentView: View {
             )
             .padding(.bottom, 2)
 
-            // 2. Mode Switcher (PHOTO / VIDEO) or Recording Stopwatch
+            // 2. Mode Switcher (PHOTO / VIDEO) or Recording Stopwatch — animated together with
+            //    the strip above, so opening it slides the controls rather than snapping them.
             if state.mode.isContinuousCapture && state.isRecording {
                 recordingStopwatch
                     .padding(.vertical, 4)
@@ -1001,6 +1050,8 @@ struct CameraContentView: View {
         onToggleTimerMenu: {},
         onSetTimerDelay: { _ in },
         onSelectZoom: { _, _ in },
+        onToggleFilterPicker: {},
+        onSelectFilter: { _ in },
         onTapToFocus: { _, _, _ in },
         onClearFocusLock: {},
         onOpenLibrary: nil,
@@ -1030,6 +1081,8 @@ struct CameraContentView: View {
         onToggleTimerMenu: {},
         onSetTimerDelay: { _ in },
         onSelectZoom: { _, _ in },
+        onToggleFilterPicker: {},
+        onSelectFilter: { _ in },
         onTapToFocus: { _, _, _ in },
         onClearFocusLock: {},
         onOpenLibrary: nil,

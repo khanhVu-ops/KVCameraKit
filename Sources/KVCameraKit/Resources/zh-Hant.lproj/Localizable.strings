@@ -17,3 +17,11 @@
 "SCAN" = "掃描";
 "Position the document in frame" = "將文件放入取景框";
 "Could not read the document" = "無法識別文件";
+
+/* Filter names. Short by design: they sit on a chip in a strip across the
+   bottom of the viewfinder, and a long one scrolls the strip. */
+"Original" = "原圖";
+"Vivid" = "鮮明";
+"Warm" = "暖色";
+"Cool" = "冷色";
+"Mono" = "單色";

@@ -17,3 +17,11 @@
 "SCAN" = "스캔";
 "Position the document in frame" = "문서를 화면에 맞추세요";
 "Could not read the document" = "문서를 인식할 수 없습니다";
+
+/* Filter names. Short by design: they sit on a chip in a strip across the
+   bottom of the viewfinder, and a long one scrolls the strip. */
+"Original" = "원본";
+"Vivid" = "선명하게";
+"Warm" = "따뜻하게";
+"Cool" = "차갑게";
+"Mono" = "모노";

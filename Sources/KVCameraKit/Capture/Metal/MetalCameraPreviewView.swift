@@ -14,6 +14,10 @@ struct MetalCameraPreviewView: UIViewRepresentable {
     /// Mirrored for the front camera: a preview of your own face is a mirror in every camera
     /// app, while the captured file is not.
     let isMirrored: Bool
+    /// The look. Composed into a matrix here rather than per frame, and handed to the same
+    /// renderer that draws — the still path gets the same matrix, so the photo and the
+    /// viewfinder cannot disagree.
+    let tone: CameraTone
     /// `(devicePoint, viewPoint, isLocked)`, matching the system preview's contract.
     let onTapToFocus: (CGPoint, CGPoint, Bool) -> Void
 
@@ -53,6 +57,7 @@ struct MetalCameraPreviewView: UIViewRepresentable {
 
     func updateUIView(_ uiView: MTKView, context: Context) {
         context.coordinator.renderer?.isMirrored = isMirrored
+        context.coordinator.renderer?.toneMatrix = tone.colorMatrix
         context.coordinator.onTapToFocus = onTapToFocus
     }
 

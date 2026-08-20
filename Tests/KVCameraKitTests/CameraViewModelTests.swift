@@ -1,4 +1,5 @@
 import XCTest
+import simd
 import AVFoundation
 import UIKit
 @testable import KVCameraKit
@@ -453,6 +454,102 @@ final class CameraViewModelTests: XCTestCase {
         try await waitUntil { viewModel.state.authorization == .authorized }
 
         XCTAssertEqual(viewModel.state.currentZoom, 4.0)
+    }
+
+    // MARK: - Filters
+
+    func test_pickingAFilterAppliesItAndClosesTheStrip() {
+        let viewModel = makeViewModel(camera: StubCamera())
+
+        viewModel.send(.toggleFilterPicker)
+        XCTAssertTrue(viewModel.state.isFilterPickerOpen)
+
+        viewModel.send(.setFilter(.mono))
+        XCTAssertEqual(viewModel.state.filter.id, CameraFilter.mono.id)
+        XCTAssertFalse(viewModel.state.isFilterPickerOpen, "picking has to close the strip in the same update")
+    }
+
+    /// A mode that cannot carry the look must not accept one.
+    ///
+    /// Not a UI nicety: on the default recording engine the file never passes through this
+    /// app, so a filtered viewfinder in video mode would promise a look the recording cannot
+    /// have.
+    func test_videoAndScanModesRefuseAFilter() {
+        let viewModel = makeViewModel(camera: StubCamera())
+
+        viewModel.send(.setMode(.video))
+        viewModel.send(.setFilter(.vivid))
+        XCTAssertEqual(viewModel.state.filter.id, CameraFilter.original.id)
+
+        viewModel.send(.setMode(.scan))
+        viewModel.send(.setFilter(.warm))
+        XCTAssertEqual(viewModel.state.filter.id, CameraFilter.original.id)
+    }
+
+    /// And leaving photo mode drops the look rather than showing it over a file that will not
+    /// have it.
+    func test_leavingPhotoModeClearsTheFilter() {
+        let viewModel = makeViewModel(camera: StubCamera())
+
+        viewModel.send(.setFilter(.vivid))
+        viewModel.send(.toggleFilterPicker)
+        XCTAssertEqual(viewModel.state.filter.id, CameraFilter.vivid.id)
+
+        viewModel.send(.setMode(.video))
+        XCTAssertEqual(viewModel.state.filter.id, CameraFilter.original.id)
+        XCTAssertFalse(viewModel.state.isFilterPickerOpen)
+    }
+
+    /// The look reaches the bytes that are stored, and the card that flies.
+    ///
+    /// The end of the whole feature: a viewfinder showing a look and a photo without it would
+    /// be the failure this is all arranged to prevent, so the assertion is on what the host
+    /// actually receives.
+    func test_aFilteredCaptureStoresFilteredBytes() async throws {
+        let camera = StubCamera()
+        let handler = StubHandler()
+        let viewModel = makeViewModel(camera: camera, handler: handler)
+
+        viewModel.send(.shutterTapped)
+        try await waitUntil { handler.stored.count == 1 }
+        let unfiltered = try XCTUnwrap(handler.stored.first?.first)
+
+        // The flight is what returns the shutter to idle, and in a test there is no view to
+        // report that it landed — without this the second tap is dropped as a double press,
+        // which is the guard working exactly as intended.
+        viewModel.send(.captureFlightCompleted)
+        try await waitUntil { !viewModel.state.isCaptureBusy }
+
+        viewModel.send(.setFilter(.mono))
+        viewModel.send(.shutterTapped)
+        try await waitUntil { handler.stored.count == 2 }
+        let filtered = try XCTUnwrap(handler.stored.last?.first)
+
+        XCTAssertNotEqual(filtered.data, unfiltered.data, "the look never reached the photo")
+        XCTAssertNotEqual(filtered.previewData, unfiltered.previewData, "the flight card would not match the photo")
+        // A filtered photo is a re-encode, and it must not be written to disk under the
+        // container it no longer is.
+        XCTAssertEqual(filtered.fileExtension, "jpg")
+
+        // Greyscale, measurably: the mono preset collapses saturation, so the channels of the
+        // stored image have to agree where they did not before.
+        let (before, after) = (try Self.channels(of: unfiltered.data), try Self.channels(of: filtered.data))
+        XCTAssertGreaterThan(abs(before.x - before.z), 0.05, "the fixture was already grey — the test proves nothing")
+        XCTAssertEqual(after.x, after.z, accuracy: 4.0 / 255.0)
+    }
+
+    /// The centre pixel's channels, for asserting a look actually landed.
+    private static func channels(of jpeg: Data) throws -> SIMD3<Float> {
+        let image = try XCTUnwrap(UIImage(data: jpeg)?.cgImage)
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let context = try XCTUnwrap(CGContext(
+            data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.draw(image, in: CGRect(x: -CGFloat(image.width) / 2, y: -CGFloat(image.height) / 2,
+                                       width: CGFloat(image.width), height: CGFloat(image.height)))
+        return SIMD3<Float>(Float(pixel[0]) / 255, Float(pixel[1]) / 255, Float(pixel[2]) / 255)
     }
 
     // MARK: - Streaming a recording

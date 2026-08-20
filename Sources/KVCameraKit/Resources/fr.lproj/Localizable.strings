@@ -17,3 +17,11 @@
 "SCAN" = "SCANNER";
 "Position the document in frame" = "Placez le document dans le cadre";
 "Could not read the document" = "Impossible de lire le document";
+
+/* Filter names. Short by design: they sit on a chip in a strip across the
+   bottom of the viewfinder, and a long one scrolls the strip. */
+"Original" = "Original";
+"Vivid" = "Éclatant";
+"Warm" = "Chaud";
+"Cool" = "Froid";
+"Mono" = "Mono";
