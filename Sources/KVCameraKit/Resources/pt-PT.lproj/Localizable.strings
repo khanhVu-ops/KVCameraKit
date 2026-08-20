@@ -25,3 +25,34 @@
 "Warm" = "Quente";
 "Cool" = "Frio";
 "Mono" = "Mono";
+
+/* Phase 2 look shelves, film simulations, LUTs and beauty control. */
+"Styles" = "Estilos";
+"Film" = "Película";
+"LUT" = "LUT";
+"Beauty" = "Beleza";
+"Beauty intensity" = "Intensidade de beleza";
+"Smooth" = "Suavizar";
+"Brighten" = "Iluminar";
+"Rosy" = "Rosado";
+"Define" = "Definir";
+"Portra 400" = "Portra 400";
+"Fuji Superia" = "Fuji Superia";
+"Cinestill 800T" = "Cinestill 800T";
+"Polaroid" = "Polaroid";
+"Vintage Y2K" = "Vintage Y2K";
+"Teal & Orange" = "Azul-petróleo e laranja";
+"Cyberpunk" = "Cyberpunk";
+"Film Noir" = "Filme noir";
+"Warm Sunset" = "Pôr do sol quente";
+
+/* The unified look shelf: one panel with the censor beside the looks, so a header can
+   name every stage that is currently changing the picture. */
+"Mosaic" = "Mosaico";
+"Blur" = "Desfoque";
+"Censor Bar" = "Barra de censura";
+"Privacy" = "Privacidade";
+"No look applied" = "Nenhum efeito aplicado";
+"Reset look" = "Reiniciar efeito";
+"Faces are covered in the photo and the video, not just on screen" = "Os rostos são cobertos na foto e no vídeo, não apenas no ecrã";
+"Face censoring is unavailable in this build" = "A censura de rostos não está disponível nesta versão";

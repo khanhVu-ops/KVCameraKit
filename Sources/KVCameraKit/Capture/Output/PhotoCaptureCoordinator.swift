@@ -31,17 +31,47 @@ final class PhotoCaptureCoordinator: NSObject, @unchecked Sendable {
     /// frame in tens of milliseconds instead of hundreds, and they are the cheapest
     /// possible win for how immediate the capture feels. They must be enabled in this
     /// order: zero shutter lag, then responsive capture, then fast prioritization.
-    func configureOutput() {
-        output.maxPhotoQualityPrioritization = .balanced
+    /// Session queue only, inside a configuration block.
+    ///
+    /// `device` is passed so the output can be told how large a photograph it is allowed to
+    /// produce. That is not a detail: `maxPhotoDimensions` defaults to the active format's
+    /// **video** dimensions, so a session running a deliberately-chosen 1920x1440 preview format
+    /// would quietly hand back 2.8 MP photographs from a 12 MP sensor. Left on the photo preset it
+    /// was merely capped at the base resolution and the 24 and 48 MP modes were unreachable.
+    func configureOutput(device: AVCaptureDevice? = nil) {
+        // `.quality`, not `.balanced`.
+        //
+        // This one line is most of "the photos are worse than the stock camera's", and it is not
+        // a subtle effect: `.balanced` tells AVFoundation it may skip the multi-frame work —
+        // Deep Fusion, the full Smart HDR fusion — when it judges the scene not to need it, and
+        // indoors it judges that often. The cost is shutter latency measured in a fraction of a
+        // second, against detail in skin, fabric and shadow that cannot be recovered afterwards.
+        //
+        // `maxPhotoQualityPrioritization` is a ceiling and the per-shot setting is the request,
+        // so both have to say `.quality` or the ceiling clamps it back.
+        output.maxPhotoQualityPrioritization = .quality
 
+        if let dimensions = device.flatMap({ CameraFormatSelector.maxPhotoDimensions(for: $0.activeFormat) }) {
+            output.maxPhotoDimensions = dimensions
+        }
+
+        // Kept: zero-shutter-lag captures the frame at the moment of the tap rather than after
+        // it, and responsive capture lets the next tap start before the previous photo has
+        // finished processing. Neither trades away image quality.
         if output.isZeroShutterLagSupported {
             output.isZeroShutterLagEnabled = true
         }
         if output.isResponsiveCaptureSupported {
             output.isResponsiveCaptureEnabled = true
         }
+
+        // Dropped, deliberately. Fast capture prioritisation *does* trade image quality: it lets
+        // the pipeline reduce processing to keep up while the shutter is being pressed
+        // repeatedly, which is the right call for a burst and the wrong one for a camera whose
+        // photographs are the product. It was on at the same time as `.balanced`, so the two were
+        // compounding.
         if output.isFastCapturePrioritizationSupported {
-            output.isFastCapturePrioritizationEnabled = true
+            output.isFastCapturePrioritizationEnabled = false
         }
     }
 
@@ -88,7 +118,14 @@ final class PhotoCaptureCoordinator: NSObject, @unchecked Sendable {
             settings = AVCapturePhotoSettings()
         }
 
-        settings.photoQualityPrioritization = .balanced
+        // Matches the ceiling set in `configureOutput`. Asking for `.balanced` here would give
+        // the ceiling nothing to do.
+        settings.photoQualityPrioritization = .quality
+
+        // The full size the output is configured for. Omitted, this defaults to the same place
+        // `maxPhotoDimensions` used to — the format's video dimensions — so the request has to
+        // repeat what the output was told.
+        settings.maxPhotoDimensions = output.maxPhotoDimensions
 
         // The small representation that the flight animation flies. Asking for it costs
         // nothing extra — it is produced from the same frame — and it is the difference

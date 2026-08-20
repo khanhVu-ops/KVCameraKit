@@ -23,7 +23,7 @@ public struct CameraScreen: View {
         controlTitles: CameraControlTitles,
         onDismiss: @escaping () -> Void,
         onOpenLibrary: CameraLibraryOpener? = nil,
-        previewEngine: CameraPreviewEngine = .system,
+        previewEngine: CameraPreviewEngine = .metal,
         recordingEngine: CameraRecordingEngine = .movieFile
     ) {
         self.controlTitles = controlTitles
@@ -53,10 +53,14 @@ public struct CameraScreen: View {
             onToggleTimerMenu: { viewModel.send(.toggleTimerMenu) },
             onSetTimerDelay: { viewModel.send(.setTimerDelay($0)) },
             onSelectZoom: { factor, animated in viewModel.send(.setZoom(factor, animated: animated)) },
-            onToggleFilterPicker: { viewModel.send(.toggleFilterPicker) },
+            onToggleLookShelf: { viewModel.send(.toggleLookShelf) },
+            onTogglePrivacyShelf: { viewModel.send(.togglePrivacyShelf) },
+            onSelectShelfTab: { viewModel.send(.selectShelfTab($0)) },
+            onCloseShelf: { viewModel.send(.closeShelf) },
             onSelectFilter: { viewModel.send(.setFilter($0)) },
-            onToggleCensorPicker: { viewModel.send(.toggleCensorPicker) },
+            onSetBeauty: { viewModel.send(.setBeauty($0)) },
             onSelectCensorMode: { viewModel.send(.setCensorMode($0)) },
+            onResetLook: { viewModel.send(.resetLook) },
             onTapToFocus: { devPoint, viewPoint, locked in
                 viewModel.send(.focusAt(devicePoint: devPoint, viewPoint: viewPoint, locked: locked))
             },
@@ -115,10 +119,14 @@ struct CameraContentView: View {
     let onToggleTimerMenu: () -> Void
     let onSetTimerDelay: (Int) -> Void
     let onSelectZoom: (CGFloat, Bool) -> Void
-    let onToggleFilterPicker: () -> Void
+    let onToggleLookShelf: () -> Void
+    let onTogglePrivacyShelf: () -> Void
+    let onSelectShelfTab: (CameraLookShelfTab) -> Void
+    let onCloseShelf: () -> Void
     let onSelectFilter: (CameraFilter) -> Void
-    let onToggleCensorPicker: () -> Void
+    let onSetBeauty: (CameraBeauty) -> Void
     let onSelectCensorMode: (CameraCensorMode) -> Void
+    let onResetLook: () -> Void
     let onTapToFocus: (CGPoint, CGPoint, Bool) -> Void
     let onClearFocusLock: () -> Void
     let onOpenLibrary: CameraLibraryOpener?
@@ -186,7 +194,8 @@ struct CameraContentView: View {
                             MetalCameraPreviewView(
                                 frames: cameraService.frames,
                                 isMirrored: state.isUsingFrontCamera,
-                                tone: state.filter.tone,
+                                filter: state.filter,
+                                beauty: state.beauty,
                                 censorMode: state.censorMode,
                                 // A closure, not the array: the geometry updates on the
                                 // detector's queue and the viewfinder draws at 60 Hz, while
@@ -346,7 +355,7 @@ struct CameraContentView: View {
                     // builds only — see `CameraFrameStatisticsHUD` for why it is also the
                     // tap's first consumer.
                     #if DEBUG
-                    if !state.isTimerMenuOpen && !state.isCensorPickerOpen && !state.isFilterPickerOpen {
+                    if !state.isTimerMenuOpen && !state.isShelfOpen {
                         CameraFrameStatisticsHUD(
                             frames: cameraService.frames,
                             requestedZoom: state.currentZoom,
@@ -409,16 +418,17 @@ struct CameraContentView: View {
 
                         switch CameraViewfinderSwipe.classify(value.translation, canFilter: canFilter) {
                         case .mode(let step):
-                            guard !state.isFilterPickerOpen && !state.isCensorPickerOpen else { return }
+                            guard !state.isShelfOpen else { return }
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
                                 onSetMode(state.mode.stepped(by: step))
                             }
 
                         case .filters(let open):
-                            guard !state.isCensorPickerOpen else { return }
-                            guard open != state.isFilterPickerOpen else { return }
+                            // One shelf, so the swipe no longer has to ask which of two is
+                            // showing — it opens or closes the one there is.
+                            guard open != state.isShelfOpen else { return }
                             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                onToggleFilterPicker()
+                                if open { onToggleLookShelf() } else { onCloseShelf() }
                             }
 
                         case .none:
@@ -622,7 +632,7 @@ struct CameraContentView: View {
         if canCensor {
         Button {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                onToggleCensorPicker()
+                onTogglePrivacyShelf()
             }
         } label: {
             Image(systemName: state.censorMode.systemIconName)
@@ -635,7 +645,7 @@ struct CameraContentView: View {
                         .fill(Color.yellow)
                         .frame(width: 4, height: 4)
                         .offset(y: 3)
-                        .opacity(state.isCensorPickerOpen ? 1 : 0)
+                        .opacity(state.openShelfTab == .privacy ? 1 : 0)
                 }
         }
         }
@@ -654,7 +664,7 @@ struct CameraContentView: View {
     }
 
     private var isFiltering: Bool {
-        state.filter.id != CameraFilter.original.id
+        state.filter.id != CameraFilter.original.id || state.beauty.isEnabled
     }
 
     @ViewBuilder
@@ -662,7 +672,7 @@ struct CameraContentView: View {
         if canFilter {
             Button {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    onToggleFilterPicker()
+                    onToggleLookShelf()
                 }
             } label: {
                 Image(systemName: "camera.filters")
@@ -679,7 +689,7 @@ struct CameraContentView: View {
                             .fill(Color.yellow)
                             .frame(width: 4, height: 4)
                             .offset(y: 3)
-                            .opacity(state.isFilterPickerOpen ? 1 : 0)
+                            .opacity(state.openShelfTab?.needsLookSupport == true ? 1 : 0)
                     }
             }
             .transition(.scale.combined(with: .opacity))
@@ -829,23 +839,26 @@ struct CameraContentView: View {
 
     private var bottomControls: some View {
         VStack(spacing: theme.spacingS) {
-            if canFilter && state.isFilterPickerOpen {
-                CameraFilterStrip(
+            if let tab = state.openShelfTab {
+                CameraLookShelf(
                     filters: CameraFilter.all,
-                    selectedID: state.filter.id,
+                    selectedFilterID: state.filter.id,
+                    beauty: state.beauty,
+                    censorMode: state.censorMode,
+                    stages: state.activeLookStages,
+                    tab: tab,
+                    canFilter: canFilter,
+                    canCensor: canCensor,
                     frames: cameraService.frames,
-                    onSelect: onSelectFilter,
-                    onDismiss: onToggleFilterPicker
+                    onSelectTab: onSelectShelfTab,
+                    onSelectFilter: onSelectFilter,
+                    onBeautyChange: onSetBeauty,
+                    onSelectCensorMode: onSelectCensorMode,
+                    onReset: onResetLook,
+                    onClose: onCloseShelf
                 )
                 .transition(.move(edge: .bottom).combined(with: .opacity))
                 .padding(.bottom, 2)
-            } else if state.isCensorPickerOpen {
-                CameraCensorPicker(
-                    selectedMode: state.censorMode,
-                    onSelect: onSelectCensorMode
-                )
-                .transition(.move(edge: .bottom).combined(with: .opacity))
-                .padding(.bottom, 6)
             } else {
                 CameraZoomPicker(
                     levels: state.zoomLevels,
@@ -1168,10 +1181,14 @@ struct CameraContentView: View {
         onToggleTimerMenu: {},
         onSetTimerDelay: { _ in },
         onSelectZoom: { _, _ in },
-        onToggleFilterPicker: {},
+        onToggleLookShelf: {},
+        onTogglePrivacyShelf: {},
+        onSelectShelfTab: { _ in },
+        onCloseShelf: {},
         onSelectFilter: { _ in },
-        onToggleCensorPicker: {},
+        onSetBeauty: { _ in },
         onSelectCensorMode: { _ in },
+        onResetLook: {},
         onTapToFocus: { _, _, _ in },
         onClearFocusLock: {},
         onOpenLibrary: nil,
@@ -1201,10 +1218,14 @@ struct CameraContentView: View {
         onToggleTimerMenu: {},
         onSetTimerDelay: { _ in },
         onSelectZoom: { _, _ in },
-        onToggleFilterPicker: {},
+        onToggleLookShelf: {},
+        onTogglePrivacyShelf: {},
+        onSelectShelfTab: { _ in },
+        onCloseShelf: {},
         onSelectFilter: { _ in },
-        onToggleCensorPicker: {},
+        onSetBeauty: { _ in },
         onSelectCensorMode: { _ in },
+        onResetLook: {},
         onTapToFocus: { _, _, _ in },
         onClearFocusLock: {},
         onOpenLibrary: nil,

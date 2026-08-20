@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 import UIKit
 
 /// Turning what `AVCapturePhoto` hands back into bytes worth storing.
@@ -24,6 +25,15 @@ enum CapturedPhotoDecoder {
             }
         }
         return "jpg"
+    }
+
+    static func orientation(for data: Data) -> CGImagePropertyOrientation {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        else { return .up }
+
+        let raw = (properties[kCGImagePropertyOrientation] as? NSNumber)?.uint32Value ?? 1
+        return CGImagePropertyOrientation(rawValue: raw) ?? .up
     }
 
     /// Bakes the sensor orientation into pixels.

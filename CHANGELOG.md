@@ -4,6 +4,26 @@ All notable changes to KVCameraKit are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- **Phase 2 look pipeline: Tone -> 3D LUT -> Beauty.** The Metal preview now uploads
+  normalized 3D textures and runs tone, trilinear LUT grading, skin-isolated bilateral
+  smoothing, grain and light leaks in one fragment pass. Captured stills and shelf thumbnails
+  consume the same tone matrix and LUT values through `CameraLookRenderer`.
+
+- **Reusable `.cube` and Hald CLUT loaders.** `CameraLUT.cube(id:data:)` handles the standard
+  blue-fastest file order plus `DOMAIN_MIN/MAX`; `CameraLUT.haldCLUT(id:pngData:)` accepts
+  square Hald images including the common 512 x 512 level-8 format. Both normalize to the
+  red-fastest layout Metal and Core Image share.
+
+- **Film and cinematic presets.** Portra 400, Fuji Superia, Cinestill 800T, Polaroid and
+  Vintage Y2K ship beside Teal & Orange, Cyberpunk, Film Noir and Warm Sunset. Film presets
+  add procedural grain and light leaks after their colour cube.
+
+- **Four-tab filter shelf.** `CameraFilterStrip` now exposes Styles, Film, LUT and Beauty.
+  Beauty includes independent Smooth, Brighten, Rosy and Define controls, with package-owned
+  translations in all 19 languages.
+
 ### Changed
 
 - **Face censoring is now a stage in the pixel pipeline instead of an overlay on top of it.**
@@ -19,6 +39,15 @@ All notable changes to KVCameraKit are documented in this file.
   cannot reach the pixels must not be offered: it looks applied and records uncensored.
 
 ### Fixed
+
+- **Film chips, live preview and captures now share the same colour baseline.** The Metal
+  preview reads the YCbCr matrix and source colour space attached to each camera buffer instead
+  of assuming BT.709/sRGB, and the Core Image film grain/light leak uses the same direction and
+  intensity as the shader. Filter thumbnails also include the current beauty recipe.
+
+- **Filtered portrait photos were saved sideways.** Applying a look re-encoded the frame and
+  dropped its EXIF orientation without first rotating the pixels. `CameraLookRenderer` now
+  normalizes the orientation before Tone -> LUT -> Beauty -> Film and writes an upright JPEG.
 
 - **A censored recording was not censored.** `CensorRenderer` was only ever called on the photo
   path, so with the feature on, video came out of the vault with every face legible — while the

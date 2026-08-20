@@ -15,6 +15,12 @@ focus with AE/AF lock, exposure compensation, a self-timer, grid, torch, Camera 
 support on iPhone 16 and later, and a capture animation that starts the moment there is a
 sharp frame to fly rather than after encryption finishes.
 
+The Metal viewfinder also carries a complete look pipeline: photographic styles, `.cube`
+and Hald CLUT 3D LUTs, five film simulations with grain/light leaks, and skin-aware beauty
+controls for smoothing, brightening, rosy tone and definition. Tone, LUT and beauty are
+composed in one fragment pass; captured stills use the same matrix and LUT recipe through the
+GPU-backed Core Image path.
+
 What it deliberately does **not** know is storage. The host passes in a
 `CameraArtifactHandler` and gets `CaptureArtifact` values back:
 
@@ -105,10 +111,10 @@ photo.
 Capture/
   CameraService            the CameraCapturing façade: session, device, queue
   Device/                  zoom ladder · device discovery · focus/exposure/torch
-  Output/                  photo capture · movie recording · asset writer · segment pump
+  Output/                  photo capture · look/LUT render · movie recording · segment pump
   Session/                 audio · rotation · interruptions · Camera Control
   Frames/                  FrameSource · frame tap · statistics
-Core/                      CaptureArtifact · CaptureVideoSink · CameraMode · theme · haptics
+Core/                      artifacts · modes · tone · LUT · beauty · film · theme · haptics
 UI/                        CameraScreen · CameraViewModel · components
 Resources/                 19 × Localizable.strings
 ```
@@ -121,7 +127,7 @@ performance, which only a device can answer, but they keep the screen inspectabl
 
 ## Tests
 
-96 tests, none of which need a camera — including a recording written, streamed, and read
+181 tests, none of which need a camera — including a recording written, streamed, and read
 back as a playable asset entirely from synthesised sample buffers.
 
 ```bash

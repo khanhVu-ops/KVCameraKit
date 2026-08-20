@@ -52,14 +52,14 @@ final class CameraViewModelTests: XCTestCase {
         let viewModel = makeViewModel(camera: camera, handler: handler)
 
         XCTAssertEqual(viewModel.state.censorMode, .off)
-        XCTAssertFalse(viewModel.state.isCensorPickerOpen)
+        XCTAssertNil(viewModel.state.openShelfTab)
 
-        viewModel.send(.toggleCensorPicker)
-        XCTAssertTrue(viewModel.state.isCensorPickerOpen)
+        viewModel.send(.togglePrivacyShelf)
+        XCTAssertEqual(viewModel.state.openShelfTab, .privacy)
 
         viewModel.send(.setCensorMode(.mosaic))
         XCTAssertEqual(viewModel.state.censorMode, .mosaic)
-        XCTAssertFalse(viewModel.state.isCensorPickerOpen)
+        XCTAssertEqual(viewModel.state.openShelfTab, .privacy, "the four modes are there to be compared")
 
         viewModel.send(.setCensorMode(.blur))
         XCTAssertEqual(viewModel.state.censorMode, .blur)
@@ -84,8 +84,11 @@ final class CameraViewModelTests: XCTestCase {
 
         XCTAssertFalse(viewModel.state.isCensorSupported)
 
-        viewModel.send(.toggleCensorPicker)
-        XCTAssertFalse(viewModel.state.isCensorPickerOpen)
+        viewModel.send(.togglePrivacyShelf)
+        XCTAssertNil(viewModel.state.openShelfTab)
+
+        viewModel.send(.selectShelfTab(.privacy))
+        XCTAssertNil(viewModel.state.openShelfTab, "a tab that cannot be honoured must not open either")
 
         viewModel.send(.setCensorMode(.mosaic))
         XCTAssertEqual(viewModel.state.censorMode, .off)
@@ -552,15 +555,110 @@ final class CameraViewModelTests: XCTestCase {
 
     // MARK: - Filters
 
-    func test_pickingAFilterAppliesItAndClosesTheStrip() {
+    func test_pickingAFilterAppliesItAndKeepsTheMultiTabStripOpen() {
         let viewModel = makeViewModel(camera: StubCamera())
 
-        viewModel.send(.toggleFilterPicker)
-        XCTAssertTrue(viewModel.state.isFilterPickerOpen)
+        viewModel.send(.toggleLookShelf)
+        XCTAssertEqual(viewModel.state.openShelfTab, .styles)
 
         viewModel.send(.setFilter(.mono))
         XCTAssertEqual(viewModel.state.filter.id, CameraFilter.mono.id)
-        XCTAssertFalse(viewModel.state.isFilterPickerOpen, "picking has to close the strip in the same update")
+        XCTAssertEqual(viewModel.state.openShelfTab, .styles, "the user still needs the Film, LUT and Beauty tabs")
+    }
+
+    /// One shelf, so the two controls that open it can never both be showing.
+    ///
+    /// This is the property the type change bought. With `isFilterPickerOpen` and
+    /// `isCensorPickerOpen` there was nothing stopping both being true — only two `send` cases
+    /// that each remembered to clear the other, and a view that composed them into an
+    /// `if`/`else if` and therefore *hid* the bug rather than preventing it.
+    func test_theLookAndPrivacyButtonsShareOneShelf() {
+        let viewModel = makeViewModel(camera: StubCamera())
+
+        viewModel.send(.toggleLookShelf)
+        XCTAssertEqual(viewModel.state.openShelfTab, .styles)
+
+        viewModel.send(.togglePrivacyShelf)
+        XCTAssertEqual(viewModel.state.openShelfTab, .privacy, "one shelf, so this replaces rather than stacks")
+
+        viewModel.send(.togglePrivacyShelf)
+        XCTAssertNil(viewModel.state.openShelfTab)
+    }
+
+    /// Reopening lands where the user left off, including on Beauty — which has no selection to
+    /// recompute a tab from, which is why the tab is remembered rather than derived.
+    func test_theShelfReopensOnTheTabItWasLeftOn() {
+        let viewModel = makeViewModel(camera: StubCamera())
+
+        viewModel.send(.toggleLookShelf)
+        viewModel.send(.selectShelfTab(.beauty))
+        viewModel.send(.toggleLookShelf)
+        XCTAssertNil(viewModel.state.openShelfTab)
+
+        viewModel.send(.toggleLookShelf)
+        XCTAssertEqual(viewModel.state.openShelfTab, .beauty)
+    }
+
+    /// Picking a film preset moves the remembered tab, so the button reopens on Film.
+    func test_pickingAFilmPresetRemembersTheFilmTab() {
+        let viewModel = makeViewModel(camera: StubCamera())
+
+        viewModel.send(.setFilter(.cinestill800T))
+        viewModel.send(.toggleLookShelf)
+        XCTAssertEqual(viewModel.state.openShelfTab, .film)
+    }
+
+    /// The header's job: name every stage that is changing the picture, in pipeline order.
+    ///
+    /// Stacking a film preset, a beauty slider and a censor is the design. Stacking them with
+    /// nothing on screen saying so is what made it feel like a bug.
+    func test_theHeaderNamesEveryStackedStageInPipelineOrder() {
+        let viewModel = makeViewModel(camera: StubCamera())
+
+        XCTAssertTrue(viewModel.state.activeLookStages.isEmpty)
+        XCTAssertFalse(viewModel.state.hasActiveLook)
+
+        viewModel.send(.setFilter(.cinestill800T))
+        viewModel.send(.setBeauty(CameraBeauty(smoothing: 0.4)))
+        viewModel.send(.setCensorMode(.mosaic))
+
+        XCTAssertEqual(viewModel.state.activeLookStages.map(\.kind), [.filter, .beauty, .censor])
+        XCTAssertTrue(viewModel.state.hasActiveLook)
+
+        viewModel.send(.resetLook)
+        XCTAssertTrue(viewModel.state.activeLookStages.isEmpty)
+        XCTAssertEqual(viewModel.state.filter.id, CameraFilter.original.id)
+        XCTAssertEqual(viewModel.state.beauty, .off)
+        XCTAssertEqual(viewModel.state.censorMode, .off)
+    }
+
+    /// Reset has to reach the service, not just the state.
+    ///
+    /// The censor lives in `CameraService`, so a reset that only cleared `CameraState` would
+    /// leave the pipeline censoring while the screen said it was not — the same class of lie as
+    /// the overlay this feature replaced, arrived at from the other direction.
+    func test_resetStopsTheServiceCensoringToo() {
+        let camera = StubCamera()
+        let viewModel = makeViewModel(camera: camera)
+
+        viewModel.send(.setCensorMode(.censorBar))
+        XCTAssertEqual(camera.censorMode, .censorBar)
+
+        viewModel.send(.resetLook)
+        XCTAssertEqual(camera.censorMode, .off)
+    }
+
+    func test_beautyClampsAndComposesWithTheSelectedFilter() {
+        let viewModel = makeViewModel(camera: StubCamera())
+
+        viewModel.send(.setFilter(.portra400))
+        viewModel.send(.setBeauty(CameraBeauty(smoothing: 1.7, brightness: 0.4, rosy: 0.3, definition: 0.2)))
+
+        XCTAssertEqual(viewModel.state.filter.id, CameraFilter.portra400.id)
+        XCTAssertEqual(viewModel.state.beauty.intensity, 1)
+        XCTAssertEqual(viewModel.state.beauty.brightness, 0.4)
+        XCTAssertEqual(viewModel.state.beauty.rosy, 0.3)
+        XCTAssertEqual(viewModel.state.beauty.definition, 0.2)
     }
 
     /// A mode that cannot carry the look must not accept one.
@@ -586,12 +684,14 @@ final class CameraViewModelTests: XCTestCase {
         let viewModel = makeViewModel(camera: StubCamera())
 
         viewModel.send(.setFilter(.vivid))
-        viewModel.send(.toggleFilterPicker)
+        viewModel.send(.setBeauty(CameraBeauty(smoothing: 0.6)))
+        viewModel.send(.toggleLookShelf)
         XCTAssertEqual(viewModel.state.filter.id, CameraFilter.vivid.id)
 
         viewModel.send(.setMode(.video))
         XCTAssertEqual(viewModel.state.filter.id, CameraFilter.original.id)
-        XCTAssertFalse(viewModel.state.isFilterPickerOpen)
+        XCTAssertEqual(viewModel.state.beauty, .off)
+        XCTAssertNil(viewModel.state.openShelfTab)
     }
 
     /// The look reaches the bytes that are stored, and the card that flies.

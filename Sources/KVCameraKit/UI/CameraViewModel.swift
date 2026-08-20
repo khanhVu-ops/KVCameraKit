@@ -56,13 +56,26 @@ struct CameraState: Equatable, Sendable {
     var isGridEnabled: Bool = false
     /// The look being applied. Photo mode only — see `CameraMode.supportsFilters`.
     var filter: CameraFilter = .original
-    /// The filter strip is open. State rather than a `@State` flag in the view, for the same
-    /// reason the timer menu is: picking a filter closes it in the same update.
-    var isFilterPickerOpen: Bool = false
+    /// Skin smoothing composes with the selected style/LUT/film preset.
+    var beauty: CameraBeauty = .off
+    /// Which page of the look shelf is open, or `nil` for closed.
+    ///
+    /// State rather than a `@State` flag in the view, for the same reason the timer menu is:
+    /// choosing something and closing the shelf happen in one update, and a local flag written
+    /// beside a state mutation did not survive the re-render.
+    ///
+    /// One optional where there were two booleans — `isFilterPickerOpen` and
+    /// `isCensorPickerOpen` — which described one mutually exclusive thing and therefore needed
+    /// every opener to remember to close the other. See `CameraLookShelfTab`.
+    var openShelfTab: CameraLookShelfTab?
+    /// The look tab to return to when the shelf is reopened from the filter button.
+    ///
+    /// Remembered rather than recomputed from the selection, because Beauty is a tab with no
+    /// selection to recompute from: a user who set smoothing and closed the shelf expects to land
+    /// back on Beauty, not on Styles.
+    var lastLookTab: CameraLookShelfTab = .styles
     /// Privacy face censoring mode (Off / Mosaic / Blur / Censor Bar).
     var censorMode: CameraCensorMode = .off
-    /// Whether the censor mode picker shelf is open.
-    var isCensorPickerOpen: Bool = false
     /// Whether this build can censor at all — a fact about the preview and recording engines,
     /// read once on appear. See `CameraService.isCensorSupported`.
     ///
@@ -112,6 +125,31 @@ struct CameraState: Equatable, Sendable {
 
     var isAuthorized: Bool { authorization == .authorized }
 
+    var isShelfOpen: Bool { openShelfTab != nil }
+
+    /// Everything currently being applied to the pixels, in pipeline order.
+    ///
+    /// Derived, not stored — and it exists because the shelf's own header shows it. "Choosing one
+    /// mode on top of another" was hard to reason about partly because nothing on screen said what
+    /// was already on: a film preset, a beauty slider and a censor all stack, and the only way to
+    /// find out was to look at the picture.
+    var activeLookStages: [CameraLookStage] {
+        var stages: [CameraLookStage] = []
+        if filter.id != CameraFilter.original.id {
+            stages.append(CameraLookStage(kind: .filter, title: filter.title))
+        }
+        if beauty.isEnabled {
+            stages.append(CameraLookStage(kind: .beauty, title: CameraLookShelfTab.beauty.title))
+        }
+        if censorMode.isEnabled {
+            stages.append(CameraLookStage(kind: .censor, title: censorMode.title))
+        }
+        return stages
+    }
+
+    /// Whether anything at all is being applied, so the shelf can offer to clear it.
+    var hasActiveLook: Bool { !activeLookStages.isEmpty }
+
     /// The shutter is unavailable while a frame is in the pipeline: two taps used to
     /// overwrite the pending capture continuation.
     var isCaptureBusy: Bool { captureStage != .idle }
@@ -141,10 +179,17 @@ final class CameraViewModel {
         case toggleTimerMenu
         case setTimerDelay(Int)
         case setZoom(CGFloat, animated: Bool)
-        case toggleFilterPicker
+        /// Open the shelf on the last look tab, or close it if it is already showing one.
+        case toggleLookShelf
+        /// Open the shelf on the privacy tab, or close it if it is already showing that.
+        case togglePrivacyShelf
+        case selectShelfTab(CameraLookShelfTab)
+        case closeShelf
         case setFilter(CameraFilter)
-        case toggleCensorPicker
+        case setBeauty(CameraBeauty)
         case setCensorMode(CameraCensorMode)
+        /// Back to no look at all: no filter, no beauty, no censor.
+        case resetLook
         case toggleHorizonLevel
         case focusAt(devicePoint: CGPoint, viewPoint: CGPoint, locked: Bool)
         case clearFocusLock
@@ -201,7 +246,7 @@ final class CameraViewModel {
         onDismiss: @escaping () -> Void,
         cameraService: (any CameraCapturing)? = nil,
         recordingEngine: CameraRecordingEngine = .movieFile,
-        previewEngine: CameraPreviewEngine = .system
+        previewEngine: CameraPreviewEngine = .metal
     ) {
         self.handler = handler
         self.onDismiss = onDismiss
@@ -306,7 +351,12 @@ final class CameraViewModel {
             // adjusted.
             if !mode.supportsFilters {
                 state.filter = .original
-                state.isFilterPickerOpen = false
+                state.beauty = .off
+                // Only the look pages close. Privacy is not a look and stays available in every
+                // mode that can censor at all.
+                if state.openShelfTab?.needsLookSupport == true {
+                    state.openShelfTab = nil
+                }
             }
             if mode.isContinuousCapture {
                 state.isTorchOn = false
@@ -350,27 +400,42 @@ final class CameraViewModel {
             }
             CameraHaptic.selection.play()
 
-        case .toggleFilterPicker:
-            state.isFilterPickerOpen.toggle()
-            if state.isFilterPickerOpen {
-                state.isCensorPickerOpen = false
-            }
+        case .toggleLookShelf:
+            guard state.mode.supportsFilters else { return }
+            openShelf(on: state.openShelfTab?.needsLookSupport == true ? nil : state.lastLookTab)
             CameraHaptic.selection.play()
+
+        case .togglePrivacyShelf:
+            guard state.isCensorSupported else { return }
+            openShelf(on: state.openShelfTab == .privacy ? nil : .privacy)
+            CameraHaptic.selection.play()
+
+        case .selectShelfTab(let tab):
+            guard tab != state.openShelfTab else { return }
+            if tab.needsLookSupport {
+                guard state.mode.supportsFilters else { return }
+            } else {
+                guard state.isCensorSupported else { return }
+            }
+            openShelf(on: tab)
+            CameraHaptic.selection.play()
+
+        case .closeShelf:
+            guard state.openShelfTab != nil else { return }
+            state.openShelfTab = nil
 
         case .setFilter(let filter):
             guard state.mode.supportsFilters else { return }
             state.filter = filter
-            state.isFilterPickerOpen = false
+            // The shelf stays open. Picking a look is a comparison — the next tap is almost
+            // always the neighbouring chip — so closing on selection means reopening five times
+            // to try five presets.
+            state.lastLookTab = CameraLookShelfTab(category: filter.category)
             CameraHaptic.selection.play()
 
-        case .toggleCensorPicker:
-            guard state.isCensorSupported else { return }
-            state.isCensorPickerOpen.toggle()
-            if state.isCensorPickerOpen {
-                state.isFilterPickerOpen = false
-                state.isTimerMenuOpen = false
-            }
-            CameraHaptic.selection.play()
+        case .setBeauty(let beauty):
+            guard state.mode.supportsFilters else { return }
+            state.beauty = beauty
 
         case .setCensorMode(let mode):
             // Refused rather than accepted-and-ignored. A censor mode this build cannot honour
@@ -379,8 +444,17 @@ final class CameraViewModel {
             guard state.isCensorSupported else { return }
             state.censorMode = mode
             cameraService.censorMode = mode
-            state.isCensorPickerOpen = false
+            // Open, for the same reason as `setFilter`: the four modes are there to be compared.
             CameraHaptic.selection.play()
+
+        case .resetLook:
+            state.filter = .original
+            state.beauty = .off
+            if state.censorMode.isEnabled {
+                state.censorMode = .off
+                cameraService.censorMode = .off
+            }
+            CameraHaptic.rigid.play()
 
         case .toggleHorizonLevel:
             state.isHorizonLevelEnabled.toggle()
@@ -535,6 +609,21 @@ final class CameraViewModel {
         }
     }
 
+    /// Shows one page of the shelf, or closes it.
+    ///
+    /// The one place `openShelfTab` is assigned from a user action, which is what makes "opening
+    /// the shelf closes the timer menu" a fact rather than a line every caller has to remember —
+    /// the omission that let the timer menu and the censor picker occupy the same space.
+    private func openShelf(on tab: CameraLookShelfTab?) {
+        state.openShelfTab = tab
+        if let tab, tab.needsLookSupport {
+            state.lastLookTab = tab
+        }
+        if tab != nil {
+            state.isTimerMenuOpen = false
+        }
+    }
+
     private func stopCountdown() {
         countdownTask?.cancel()
         countdownTask = nil
@@ -556,15 +645,33 @@ final class CameraViewModel {
                     return
                 }
 
-                // The look is baked in here, off the main actor, from the same matrix the
-                // viewfinder drew with. The *preview* is filtered too — it is what the flight
-                // card flies, and a card that does not match the photo it represents is the
-                // one frame of feedback the user gets telling them the wrong thing.
-                let tone = state.filter.tone
+                // The exact recipe the viewfinder drew, in one pass over the bytes.
+                //
+                // One call, not two. This used to be `CameraLookRenderer.apply` followed by
+                // `CensorRenderer.apply`, which meant the photo was encoded to JPEG, decoded
+                // again and re-encoded — two lossy generations to apply two effects, and an HEIC
+                // demoted to a JPEG on the way. The order the stages run in is the shader's, and
+                // it now lives in exactly one place.
+                let filter = state.filter
+                let beauty = state.beauty
+                let censorMode = state.censorMode
+                // The geometry the viewfinder was drawing, read here on the main actor before
+                // the render task starts. `CameraLookRenderer` unions it with its own detection
+                // pass rather than trusting either alone.
+                let regions = censorMode.isEnabled ? cameraService.censorRegions : []
                 let filtered = await Task.detached(priority: .userInitiated) {
-                    (
-                        full: ToneRenderer.apply(tone, to: shot.data),
-                        preview: shot.preview.flatMap { ToneRenderer.apply(tone, to: $0) }
+                    func render(_ data: Data) -> (data: Data, fileExtension: String)? {
+                        CameraLookRenderer.apply(
+                            filter: filter,
+                            beauty: beauty,
+                            censorMode: censorMode,
+                            liveRegions: regions,
+                            to: data
+                        )
+                    }
+                    return (
+                        full: render(shot.data),
+                        preview: shot.preview.flatMap(render)
                     )
                 }.value
 

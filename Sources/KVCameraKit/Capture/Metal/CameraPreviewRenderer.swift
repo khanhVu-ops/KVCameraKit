@@ -2,6 +2,7 @@ import CoreVideo
 import Foundation
 import Metal
 import MetalKit
+import QuartzCore
 import simd
 
 /// Draws camera frames into an `MTKView`.
@@ -24,8 +25,35 @@ final class CameraPreviewRenderer: @unchecked Sendable {
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
-    private let bgraPipeline: MTLRenderPipelineState
-    private let ycbcrPipeline: MTLRenderPipelineState
+    private let bgraLookPipeline: MTLRenderPipelineState
+    private let ycbcrLookPipeline: MTLRenderPipelineState
+    private let displayPipeline: MTLRenderPipelineState
+    private let lutTextureLoader: CameraLUTTextureLoader
+    private var lutTexture: MTLTexture
+
+    /// Where the look pass writes and the display pass reads.
+    ///
+    /// Sized to the **camera frame**, not to the drawable, which is the whole point of having
+    /// two passes: the expensive stages run once per source pixel per camera frame instead of
+    /// once per screen pixel per display refresh. On a Pro screen against a 30 fps 1440x1080
+    /// stream that is a quarter of the shading work for an identical picture.
+    private var lookTexture: MTLTexture?
+
+    /// What the look pass has already produced, against what it *would* produce now.
+    ///
+    /// Two counters rather than one, because they have different writers and combining them
+    /// would need a lock on the display path. `frameRevision` moves on the frame queue under
+    /// `lock`, beside the textures it describes; `configRevision` moves on the main thread in
+    /// `configure` and the property setters, which is also where `draw` reads it.
+    ///
+    /// The look pass re-runs when either moves; the display pass runs whenever the display
+    /// asks. So a still scene with the shelf open costs one textured quad per refresh instead
+    /// of the entire recipe, and a 30 fps camera stops paying for a 60 Hz screen.
+    private var frameRevision: UInt64 = 0
+    private var configRevision: UInt64 = 0
+    private var renderedRevision: (frame: UInt64, config: UInt64)?
+    /// The drawable size the picture currently on screen was drawn for.
+    private var presentedDrawableSize: CGSize = .zero
 
     /// Zero-copy `CVPixelBuffer` → `MTLTexture`. Wrapping the buffer's existing IOSurface
     /// rather than copying is the whole reason this is cheap enough to do per frame.
@@ -63,18 +91,33 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         let rotationAngle: CGFloat
         let sourceSize: CGSize
         let isMirrored: Bool
+        let timestamp: Float
+        let colorSpace: CGColorSpace?
     }
 
     private enum FrameFormat {
         case bgra
         /// Bi-planar YCbCr. `isFullRange` decides the conversion offset, and getting it
         /// wrong looks *almost* right rather than obviously broken.
-        case ycbcr(isFullRange: Bool)
+        case ycbcr(isFullRange: Bool, standard: YCbCrStandard)
+    }
+
+    enum YCbCrStandard: Equatable {
+        case bt601
+        case bt709
+        case bt2020
     }
 
     /// Mirrored horizontally, for the front camera. The preview is a mirror in every camera
     /// app because that is what people expect of their own face; the *capture* is not.
-    var isMirrored = false
+    ///
+    /// The mirror is applied by the *display* pass, and folded into the look pass's upright
+    /// transform in the opposite direction — so film texture lands where the saved file has it
+    /// rather than being flipped along with the scene. A light leak is a property of the stock,
+    /// not of what is in front of the lens.
+    var isMirrored = false {
+        didSet { if isMirrored != oldValue { configRevision &+= 1 } }
+    }
 
     /// The turn that makes the buffer upright in the interface the user is holding, set by the
     /// view that owns the drawable.
@@ -84,7 +127,9 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     /// UIKit has already rotated does not want it: applying it turned the picture a second
     /// time, so rotating the phone spun the image inside the frame. See
     /// `CaptureRotation.previewAngle(for:)`.
-    var previewRotationAngle: CGFloat = 90
+    var previewRotationAngle: CGFloat = 90 {
+        didSet { if previewRotationAngle != oldValue { configRevision &+= 1 } }
+    }
 
     /// The look, already composed into one matrix. Set from the screen when the user picks a
     /// filter; read once per frame.
@@ -94,8 +139,70 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     /// destinations, no second implementation to drift.
     var toneMatrix: simd_float4x4 = matrix_identity_float4x4
 
+    /// Mirrors `LookUniform` in `CameraPreview.metal` field for field.
+    ///
+    /// The two matrix-shaped fields come first because Metal aligns `float2x2` to 8 bytes and
+    /// scalars to 4: putting the floats first would leave Swift and Metal free to disagree
+    /// about where the padding goes, and a padding disagreement here is not a build error — it
+    /// is grain at the wrong intensity, which reads as a shader bug and is not one.
+    struct LookUniform {
+        /// Sensor texture coordinate (centred on 0.5) → upright image space. See `applyFilm`.
+        var uprightRotation: simd_float2x2 = matrix_identity_float2x2
+        var uprightSize: SIMD2<Float> = .one
+        var imageSize: SIMD2<Float> = .one
+        var beautySmoothing: Float = 0
+        var beautyBrightness: Float = 0
+        var beautyRosy: Float = 0
+        var beautyDefinition: Float = 0
+        var grainIntensity: Float = 0
+        var lightLeakIntensity: Float = 0
+        var grainPhase: Float = 0
+        var unused: Float = 0
+    }
+
+    private var look = LookUniform()
+    private var selectedLUTID = CameraLUT.identity.id
+
+    /// Prepares everything that changes when the user selects a look. LUT upload happens on
+    /// selection, never on the display-link draw path.
+    ///
+    /// Called from `updateUIView`, which SwiftUI runs on every re-render of the screen — so
+    /// this has to be cheap *and* has to not invalidate the look pass unless something actually
+    /// changed. Hence the comparison before the bump: tapping the grid toggle re-renders the
+    /// camera screen, and a viewfinder that re-shaded the whole frame for that would be paying
+    /// the old cost with extra steps.
+    func configure(filter: CameraFilter, beauty: CameraBeauty) {
+        let nextTone = filter.tone.colorMatrix
+        var changed = nextTone != toneMatrix
+        toneMatrix = nextTone
+
+        func set(_ keyPath: WritableKeyPath<LookUniform, Float>, _ value: Float) {
+            if look[keyPath: keyPath] != value {
+                look[keyPath: keyPath] = value
+                changed = true
+            }
+        }
+        set(\.beautySmoothing, beauty.smoothing)
+        set(\.beautyBrightness, beauty.brightness)
+        set(\.beautyRosy, beauty.rosy)
+        set(\.beautyDefinition, beauty.definition)
+        set(\.grainIntensity, filter.film.grain)
+        set(\.lightLeakIntensity, filter.film.lightLeak)
+
+        let nextID = filter.lut?.id ?? CameraLUT.identity.id
+        if nextID != selectedLUTID, let texture = lutTextureLoader.texture(for: filter.lut) {
+            lutTexture = texture
+            selectedLUTID = nextID
+            changed = true
+        }
+
+        if changed { configRevision &+= 1 }
+    }
+
     /// The censor look, set from the screen when the user picks one.
-    var censorMode: CameraCensorMode = .off
+    var censorMode: CameraCensorMode = .off {
+        didSet { if censorMode != oldValue { configRevision &+= 1 } }
+    }
 
     /// Where the face geometry comes from, asked **once per drawn frame**.
     ///
@@ -164,25 +271,29 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     init?() {
         guard let device = MTLCreateSystemDefaultDevice(),
               let commandQueue = device.makeCommandQueue() else { return nil }
+        let lutTextureLoader = CameraLUTTextureLoader(device: device)
+        guard let lutTexture = lutTextureLoader.texture(for: nil) else { return nil }
 
         // The `.metal` file is compiled by SwiftPM into the package's own bundle, so the
         // default library of `Bundle.main` is the wrong place to look — that is the host app.
         guard let library = try? device.makeDefaultLibrary(bundle: .module),
               let vertexFunction = library.makeFunction(name: "cameraPreviewVertex"),
-              let bgraFunction = library.makeFunction(name: "cameraPreviewFragmentBGRA"),
-              let ycbcrFunction = library.makeFunction(name: "cameraPreviewFragmentYCbCr")
+              let bgraFunction = library.makeFunction(name: "cameraLookFragmentBGRA"),
+              let ycbcrFunction = library.makeFunction(name: "cameraLookFragmentYCbCr"),
+              let displayFunction = library.makeFunction(name: "cameraDisplayFragment")
         else { return nil }
 
         func pipeline(fragment: MTLFunction) -> MTLRenderPipelineState? {
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = vertexFunction
             descriptor.fragmentFunction = fragment
-            descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+            descriptor.colorAttachments[0].pixelFormat = Self.lookPixelFormat
             return try? device.makeRenderPipelineState(descriptor: descriptor)
         }
 
         guard let bgraPipeline = pipeline(fragment: bgraFunction),
-              let ycbcrPipeline = pipeline(fragment: ycbcrFunction) else { return nil }
+              let ycbcrPipeline = pipeline(fragment: ycbcrFunction),
+              let displayPipeline = pipeline(fragment: displayFunction) else { return nil }
 
         var cache: CVMetalTextureCache?
         guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cache) == kCVReturnSuccess,
@@ -190,8 +301,11 @@ final class CameraPreviewRenderer: @unchecked Sendable {
 
         self.device = device
         self.commandQueue = commandQueue
-        self.bgraPipeline = bgraPipeline
-        self.ycbcrPipeline = ycbcrPipeline
+        self.bgraLookPipeline = bgraPipeline
+        self.ycbcrLookPipeline = ycbcrPipeline
+        self.displayPipeline = displayPipeline
+        self.lutTextureLoader = lutTextureLoader
+        self.lutTexture = lutTexture
         self.textureCache = textureCache
     }
 
@@ -224,6 +338,9 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         guard let prepared else { return }
         lock.lock()
         pending = prepared
+        // Bumped under the same lock that publishes the frame, so a draw can never see the new
+        // textures with the old revision and skip the pass that would have used them.
+        frameRevision &+= 1
         lock.unlock()
     }
 
@@ -235,7 +352,9 @@ final class CameraPreviewRenderer: @unchecked Sendable {
             format: .bgra,
             rotationAngle: frame.rotationAngle ?? 0,
             sourceSize: size,
-            isMirrored: isMirrored
+            isMirrored: isMirrored,
+            timestamp: Self.timestamp(for: frame),
+            colorSpace: CVImageBufferGetColorSpace(pixelBuffer)?.takeUnretainedValue()
         )
     }
 
@@ -256,11 +375,24 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         return PendingFrame(
             holders: [lumaHolder, chromaHolder],
             textures: [luma, chroma],
-            format: .ycbcr(isFullRange: isFullRange),
+            format: .ycbcr(
+                isFullRange: isFullRange,
+                standard: Self.ycbcrStandard(
+                    attachment: CVBufferCopyAttachment(pixelBuffer, kCVImageBufferYCbCrMatrixKey, nil),
+                    width: Int(size.width)
+                )
+            ),
             rotationAngle: frame.rotationAngle ?? 0,
             sourceSize: size,
-            isMirrored: isMirrored
+            isMirrored: isMirrored,
+            timestamp: Self.timestamp(for: frame),
+            colorSpace: CVImageBufferGetColorSpace(pixelBuffer)?.takeUnretainedValue()
         )
+    }
+
+    private static func timestamp(for frame: CameraFrame) -> Float {
+        let seconds = frame.presentationTime.seconds
+        return seconds.isFinite ? Float(seconds) : 0
     }
 
     private func makeTexture(
@@ -284,31 +416,143 @@ final class CameraPreviewRenderer: @unchecked Sendable {
 
     // MARK: - Drawing
 
+    /// The pixel format both passes render into.
+    ///
+    /// Eight bits, matching the drawable and the sensor's own depth. A wider intermediate would
+    /// buy precision the source never had, and cost twice the bandwidth on the one texture that
+    /// is written and read every frame.
+    static let lookPixelFormat: MTLPixelFormat = .bgra8Unorm
+
+    /// Called by the display link, which runs faster than the camera and does not stop when
+    /// the camera does.
+    ///
+    /// So the first thing it does is work out whether there is anything to draw. A `MTKView`
+    /// asks up to 120 times a second; a photo session delivers 30 frames. The three-quarters of
+    /// calls that would re-present an identical picture return here, before a drawable is even
+    /// acquired — the one already on screen stays there, which is both correct and free.
+    ///
+    /// Returning early rather than drawing anyway is what makes the display link affordable.
+    /// The alternative — pushing draws from the frame queue — means `MTKView` being driven from
+    /// a thread it is not documented as safe on, and a viewfinder is a poor place to find out.
     func draw(in view: MTKView) {
         lock.lock()
         let frame = pending
+        let frameRevision = self.frameRevision
         lock.unlock()
 
-        guard let frame,
-              let descriptor = view.currentRenderPassDescriptor,
+        guard let frame else { return }
+
+        let drawableSize = view.drawableSize
+        let wanted = (frame: frameRevision, config: configRevision)
+        let lookIsStale = renderedRevision == nil || renderedRevision! != wanted
+        // A resize hands back a fresh, empty drawable pool, so the picture has to be redrawn
+        // even when the look has not changed — this is the black-viewfinder-on-re-layout bug
+        // that `pending` is retained for, and skipping the draw would reintroduce it.
+        let sizeChanged = presentedDrawableSize != drawableSize
+
+        guard lookIsStale || sizeChanged else { return }
+
+        // Preserve the primaries carried by the camera buffer (sRGB/P3/BT.2020) so Core
+        // Animation performs the same display conversion as the system preview and the
+        // Core Image thumbnail path. sRGB is the safe fallback for an untagged frame.
+        //
+        // Assigned only on a change: writing `CAMetalLayer.colorspace` re-creates the drawable
+        // pool, and this used to run on every single frame.
+        let colorSpace = frame.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)
+        if let layer = view.layer as? CAMetalLayer, layer.colorspace != colorSpace {
+            layer.colorspace = colorSpace
+        }
+
+        guard let target = lookTarget(for: frame.sourceSize),
+              let displayDescriptor = view.currentRenderPassDescriptor,
               let drawable = view.currentDrawable,
-              let buffer = commandQueue.makeCommandBuffer(),
-              let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor)
+              let buffer = commandQueue.makeCommandBuffer()
         else { return }
 
-        var transform = Self.transform(
-            source: frame.sourceSize,
-            destination: view.drawableSize,
+        // Everything expensive lives behind this `if`. `lookTarget` may have cleared
+        // `renderedRevision` by handing back a new texture, so it is re-read rather than reused.
+        if renderedRevision == nil || renderedRevision! != wanted {
+            encodeLookPass(into: target, frame: frame, buffer: buffer)
+            renderedRevision = wanted
+        }
+
+        encodeDisplayPass(
+            from: target,
+            frame: frame,
+            descriptor: displayDescriptor,
+            drawableSize: drawableSize,
+            buffer: buffer
+        )
+
+        buffer.present(drawable)
+        buffer.commit()
+        presentedDrawableSize = drawableSize
+        // `pending` is deliberately not cleared. `accept` releases it when the next frame
+        // lands, so exactly one buffer is held and any number of redraws can use it.
+    }
+
+    /// The offscreen texture, made on the first frame and remade when the frame's size changes.
+    ///
+    /// A size change is a camera switch or a format change, not something that happens per
+    /// frame — so allocating here rather than pre-emptively costs one allocation per session.
+    private func lookTarget(for size: CGSize) -> MTLTexture? {
+        let width = max(Int(size.width.rounded()), 1)
+        let height = max(Int(size.height.rounded()), 1)
+
+        if let existing = lookTexture, existing.width == width, existing.height == height {
+            return existing
+        }
+
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: Self.lookPixelFormat,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.usage = [.renderTarget, .shaderRead]
+        // Never read by the CPU and never needed after the frame it is displayed in, so it can
+        // live in tile memory on Apple silicon rather than in system memory.
+        descriptor.storageMode = .private
+
+        let texture = device.makeTexture(descriptor: descriptor)
+        texture?.label = "KVCameraKit look \(width)x\(height)"
+        lookTexture = texture
+        // A new target holds nothing, so whatever was rendered into the old one is not a
+        // reason to skip the pass.
+        renderedRevision = nil
+        return texture
+    }
+
+    /// Censor, tone, LUT, beauty and film, at the frame's own resolution.
+    private func encodeLookPass(into target: MTLTexture, frame: PendingFrame, buffer: MTLCommandBuffer) {
+        let descriptor = MTLRenderPassDescriptor()
+        descriptor.colorAttachments[0].texture = target
+        // Every texel is written by the quad, so there is nothing worth loading.
+        descriptor.colorAttachments[0].loadAction = .dontCare
+        descriptor.colorAttachments[0].storeAction = .store
+
+        guard let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+        encoder.label = "KVCameraKit look pass"
+
+        // Identity: this pass draws the frame into a texture the same shape as the frame.
+        // Rotation, aspect fill and mirroring are the display pass's business.
+        var transform = matrix_identity_float4x4
+        var tone = toneMatrix
+
+        var frameLook = look
+        frameLook.imageSize = SIMD2<Float>(Float(frame.sourceSize.width), Float(frame.sourceSize.height))
+        let upright = Self.uprightSize(source: frame.sourceSize, rotationAngle: previewRotationAngle)
+        frameLook.uprightSize = SIMD2<Float>(Float(upright.width), Float(upright.height))
+        frameLook.uprightRotation = Self.uprightRotation(
             rotationAngle: previewRotationAngle,
             mirrored: frame.isMirrored
         )
-
-        var tone = toneMatrix
+        frameLook.grainPhase = Self.grainPhase(for: frame.timestamp)
 
         // Pulled now rather than stored — see `censorRegions`. Geometry is in normalised
         // sensor-buffer space, which is exactly what `texCoord` is, so nothing is converted
-        // here and the mirroring and rotation in `transform` carry the censor along with the
-        // picture for free.
+        // here and the mirroring and rotation of the display pass carry the censor along with
+        // the picture for free.
         var censor = Self.censorUniforms(
             mode: censorMode,
             regions: censorMode.isEnabled ? (censorRegions?() ?? []) : [],
@@ -318,33 +562,107 @@ final class CameraPreviewRenderer: @unchecked Sendable {
 
         switch frame.format {
         case .bgra:
-            encoder.setRenderPipelineState(bgraPipeline)
+            encoder.setRenderPipelineState(bgraLookPipeline)
             encoder.setFragmentTexture(frame.textures[0], index: 0)
+            encoder.setFragmentTexture(lutTexture, index: 1)
             encoder.setFragmentBytes(&tone, length: MemoryLayout<simd_float4x4>.size, index: 0)
-            encoder.setFragmentBytes(&censor.header, length: MemoryLayout<CensorHeaderUniform>.stride, index: 1)
-            encoder.setFragmentBytes(&censor.ellipses, length: ellipseStride, index: 2)
+            encoder.setFragmentBytes(&frameLook, length: MemoryLayout<LookUniform>.stride, index: 1)
+            encoder.setFragmentBytes(&censor.header, length: MemoryLayout<CensorHeaderUniform>.stride, index: 2)
+            encoder.setFragmentBytes(&censor.ellipses, length: ellipseStride, index: 3)
 
-        case .ycbcr(let isFullRange):
-            encoder.setRenderPipelineState(ycbcrPipeline)
+        case .ycbcr(let isFullRange, let standard):
+            encoder.setRenderPipelineState(ycbcrLookPipeline)
             encoder.setFragmentTexture(frame.textures[0], index: 0)
             encoder.setFragmentTexture(frame.textures[1], index: 1)
-            var conversion = Self.ycbcrToRGB(isFullRange: isFullRange)
+            encoder.setFragmentTexture(lutTexture, index: 2)
+            var conversion = Self.ycbcrToRGB(isFullRange: isFullRange, standard: standard)
             var offset = Self.ycbcrOffset(isFullRange: isFullRange)
             encoder.setFragmentBytes(&conversion, length: MemoryLayout<simd_float3x3>.size, index: 0)
             encoder.setFragmentBytes(&offset, length: MemoryLayout<simd_float3>.size, index: 1)
             encoder.setFragmentBytes(&tone, length: MemoryLayout<simd_float4x4>.size, index: 2)
-            encoder.setFragmentBytes(&censor.header, length: MemoryLayout<CensorHeaderUniform>.stride, index: 3)
-            encoder.setFragmentBytes(&censor.ellipses, length: ellipseStride, index: 4)
+            encoder.setFragmentBytes(&frameLook, length: MemoryLayout<LookUniform>.stride, index: 3)
+            encoder.setFragmentBytes(&censor.header, length: MemoryLayout<CensorHeaderUniform>.stride, index: 4)
+            encoder.setFragmentBytes(&censor.ellipses, length: ellipseStride, index: 5)
         }
 
         encoder.setVertexBytes(&transform, length: MemoryLayout<simd_float4x4>.size, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
+    }
 
-        buffer.present(drawable)
-        buffer.commit()
-        // Deliberately not cleared. `accept` releases these when the next frame lands, so
-        // exactly one buffer is held and any number of redraws can use it.
+    /// The finished frame, turned the right way up and filled to the drawable.
+    private func encodeDisplayPass(
+        from target: MTLTexture,
+        frame: PendingFrame,
+        descriptor: MTLRenderPassDescriptor,
+        drawableSize: CGSize,
+        buffer: MTLCommandBuffer
+    ) {
+        guard let encoder = buffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+        encoder.label = "KVCameraKit display pass"
+
+        var transform = Self.transform(
+            source: frame.sourceSize,
+            destination: drawableSize,
+            rotationAngle: previewRotationAngle,
+            mirrored: frame.isMirrored
+        )
+
+        encoder.setRenderPipelineState(displayPipeline)
+        encoder.setFragmentTexture(target, index: 0)
+        encoder.setVertexBytes(&transform, length: MemoryLayout<simd_float4x4>.size, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+    }
+
+    /// How far the grain pattern has moved, from the frame's presentation time.
+    ///
+    /// Quantised to whole steps at 24 Hz on purpose. Grain that advances by a fraction of a
+    /// cell every frame does not shimmer, it *crawls* — the pattern slides across the picture
+    /// like a texture on a conveyor, which is the one thing real film grain never does. Whole
+    /// steps re-roll the field instead of translating it, and 24 Hz is slower than the display
+    /// so it reads as film rather than as noise.
+    static func grainPhase(for timestamp: Float) -> Float {
+        (timestamp * 24).rounded(.down)
+    }
+
+    /// The upright image's pixel size — the frame's, axes swapped on a quarter turn.
+    static func uprightSize(source: CGSize, rotationAngle: CGFloat) -> CGSize {
+        Int(abs(rotationAngle).rounded()) % 180 == 90
+            ? CGSize(width: source.height, height: source.width)
+            : source
+    }
+
+    /// Sensor texture coordinates, centred on 0.5, into the **upright** image's own space.
+    ///
+    /// The inverse of the turn `CensorGeometry.sensorRegion` applies, and it has to stay that
+    /// way: both describe the same relationship between the buffer the shader samples and the
+    /// picture a person sees, one for face geometry and one for film texture.
+    ///
+    /// `mirrored` is folded in **backwards**. The display pass mirrors the front camera, so a
+    /// leak placed in plain upright space would arrive on screen flipped from where the same
+    /// preset puts it on the saved file — and the file is not mirrored. Flipping here cancels
+    /// the flip there, which is what makes the viewfinder and the photo agree about which side
+    /// of the frame the light came in.
+    static func uprightRotation(rotationAngle: CGFloat, mirrored: Bool) -> simd_float2x2 {
+        let turns = ((Int((rotationAngle / 90).rounded()) % 4) + 4) % 4
+
+        // Columns. `M * v` is `col0 * v.x + col1 * v.y`, so a row of this matrix is spread
+        // across both columns — which is exactly the transpose mistake that turns a quarter
+        // turn into the other quarter turn.
+        var columns: (SIMD2<Float>, SIMD2<Float>)
+        switch turns {
+        case 1:  columns = (SIMD2<Float>(0, 1), SIMD2<Float>(-1, 0))
+        case 2:  columns = (SIMD2<Float>(-1, 0), SIMD2<Float>(0, -1))
+        case 3:  columns = (SIMD2<Float>(0, -1), SIMD2<Float>(1, 0))
+        default: columns = (SIMD2<Float>(1, 0), SIMD2<Float>(0, 1))
+        }
+
+        if mirrored {
+            columns.0.x = -columns.0.x
+            columns.1.x = -columns.1.x
+        }
+        return simd_float2x2(columns.0, columns.1)
     }
 
     // MARK: - Geometry
@@ -422,22 +740,52 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         return fill * matrix
     }
 
-    /// BT.709, which is what the camera produces. BT.601 is the old standard-definition
-    /// matrix and using it tilts every skin tone.
-    static func ycbcrToRGB(isFullRange: Bool) -> simd_float3x3 {
+    /// Uses the matrix attached to each buffer. Core Image already honours this for the
+    /// filter thumbnails; hard-coding BT.709 here is why the live preview had different skin
+    /// tones from both those thumbnails and `AVCaptureVideoPreviewLayer`.
+    static func ycbcrToRGB(
+        isFullRange: Bool,
+        standard: YCbCrStandard = .bt709
+    ) -> simd_float3x3 {
         // Columns, because `simd_float3x3` is column-major and transposing this by accident
         // swaps the red and blue corrections — which looks like a white-balance problem.
-        if isFullRange {
-            return simd_float3x3(
-                SIMD3<Float>(1.0,      1.0,      1.0),
-                SIMD3<Float>(0.0,     -0.18732,  1.8556),
-                SIMD3<Float>(1.5748,  -0.46812,  0.0)
-            )
+        switch (standard, isFullRange) {
+        case (.bt601, true):
+            return Self.ycbcrMatrix(y: 1, cbGreen: -0.344136, cbBlue: 1.772, crRed: 1.402, crGreen: -0.714136)
+        case (.bt601, false):
+            return Self.ycbcrMatrix(y: 1.16438, cbGreen: -0.39176, cbBlue: 2.01723, crRed: 1.59603, crGreen: -0.81297)
+        case (.bt709, true):
+            return Self.ycbcrMatrix(y: 1, cbGreen: -0.18732, cbBlue: 1.8556, crRed: 1.5748, crGreen: -0.46812)
+        case (.bt709, false):
+            return Self.ycbcrMatrix(y: 1.16438, cbGreen: -0.21325, cbBlue: 2.11240, crRed: 1.79274, crGreen: -0.53291)
+        case (.bt2020, true):
+            return Self.ycbcrMatrix(y: 1, cbGreen: -0.16455, cbBlue: 1.8814, crRed: 1.4746, crGreen: -0.57135)
+        case (.bt2020, false):
+            return Self.ycbcrMatrix(y: 1.16438, cbGreen: -0.18733, cbBlue: 2.14177, crRed: 1.67867, crGreen: -0.65042)
         }
-        return simd_float3x3(
-            SIMD3<Float>(1.16438,  1.16438,  1.16438),
-            SIMD3<Float>(0.0,     -0.21325,  2.11240),
-            SIMD3<Float>(1.79274, -0.53291,  0.0)
+    }
+
+    static func ycbcrStandard(attachment: CFTypeRef?, width: Int) -> YCbCrStandard {
+        if let attachment {
+            if CFEqual(attachment, kCVImageBufferYCbCrMatrix_ITU_R_601_4) { return .bt601 }
+            if CFEqual(attachment, kCVImageBufferYCbCrMatrix_ITU_R_2020) { return .bt2020 }
+            if CFEqual(attachment, kCVImageBufferYCbCrMatrix_ITU_R_709_2) { return .bt709 }
+        }
+        // Core Video's conventional fallback when the attachment is missing.
+        return width >= 1_280 ? .bt709 : .bt601
+    }
+
+    private static func ycbcrMatrix(
+        y: Float,
+        cbGreen: Float,
+        cbBlue: Float,
+        crRed: Float,
+        crGreen: Float
+    ) -> simd_float3x3 {
+        simd_float3x3(
+            SIMD3<Float>(y, y, y),
+            SIMD3<Float>(0, cbGreen, cbBlue),
+            SIMD3<Float>(crRed, crGreen, 0)
         )
     }
 

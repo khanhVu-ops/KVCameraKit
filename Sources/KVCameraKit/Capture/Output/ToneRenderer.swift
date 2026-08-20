@@ -3,40 +3,32 @@ import CoreMedia
 import Foundation
 import simd
 
-/// Applies a look to an image, using the same matrix the viewfinder drew with.
+/// The two pieces of the still path that are not the look itself: the matrix hand-off to Core
+/// Image, and the base frame the filter strip builds its chips from.
 ///
-/// Two callers, one context, one decision about colour management: the captured still, and the
-/// thumbnails on the filter strip. Those thumbnails have to match the look the viewfinder is
-/// showing — a strip whose chips disagree with the live preview is worse than no chips — so
-/// they come through here rather than through a second Core Image path of their own.
+/// The look used to live here too, behind an argument for why it had to be one matrix rather than
+/// a stack of `CIColorControls`/`CITemperatureAndTint`/`CIExposureAdjust` filters that would
+/// drift from the shader one adjustment at a time. That argument was right and it grew: tone is
+/// now one stage of five, so the whole recipe lives in `CameraLookRenderer` beside the censor and
+/// the film texture, in the shader's order. What is left here is `parameters(for:)` — the one
+/// place a `simd_float4x4` becomes `CIColorMatrix` arguments — and the frame grab, which is about
+/// `FrameSource` rather than about colour.
 ///
-/// The interesting part is not the filter, it is the two ways this could have been written and
-/// only one of them stays honest. Written as a stack of Core Image filters — `CIColorControls`
-/// for saturation and contrast, `CITemperatureAndTint` for warmth, `CIExposureAdjust` for
-/// exposure — it would look right today and drift from the shader the first time either side
-/// is touched, and the symptom is a photo that does not match the viewfinder it was composed
-/// in. So the look is *one matrix*, built in `CameraTone`, and this hands that matrix to
-/// `CIColorMatrix` unchanged.
-///
-/// Two details make the parity real rather than nominal:
-///
-/// **No colour management.** The context works with `workingColorSpace: NSNull()`, so the
-/// matrix multiplies the same gamma-encoded values the shader multiplies. Core Image's default
-/// is to convert to linear light first, which is more defensible photographically and would
-/// silently make every photo differ from its preview.
-///
-/// **JPEG out, whatever came in.** Filtering is a re-encode, and a filtered HEIC would need
-/// the container rewritten; the extension is reported back so nothing writes a JPEG to disk
-/// named `.heic` — the mirror of a bug this camera already had in the other direction.
 enum ToneRenderer {
 
     /// The longest edge of a filter-strip thumbnail, in pixels.
     ///
-    /// Small on purpose. This is a chip about 56 pt wide behind a corner radius; the frame it
-    /// comes from is 1920x1080, and every filter on the strip renders from it. Downscaling
-    /// once, before the looks are applied, is the difference between five cheap renders and
-    /// five full-frame ones.
-    static let thumbnailMaxDimension: CGFloat = 160
+    /// Small on purpose. This is a chip about 62 pt wide behind a corner radius; the frame it
+    /// comes from is 1440x1080, and every filter on the strip renders from it. Downscaling
+    /// once, before the looks are applied, is the difference between a few cheap renders and a
+    /// few full-frame ones.
+    ///
+    /// Raised from 160, and not to be sharper: at 160 the base is 120 px tall, and grain sized
+    /// at `CameraFilmSimulation.grainCellsAcrossHeight` does not have a whole pixel per cell to
+    /// live in, so a film preset's most recognisable property aliased into mush on the one
+    /// control whose job is to preview it. 384 gives every cell a pixel and change, and the chip
+    /// is displayed at about 190 px, so the slight downsample is honest rather than invented.
+    static let thumbnailMaxDimension: CGFloat = 384
 
     /// Built once. A `CIContext` carries compiled kernels and a command queue, and stills
     /// arrive one shutter press at a time — rebuilding it per photo was measurable.
@@ -47,29 +39,6 @@ enum ToneRenderer {
         .workingColorSpace: NSNull(),
         .useSoftwareRenderer: false
     ])
-
-    /// The filtered image, or `nil` if the bytes could not be read.
-    ///
-    /// Returns `nil` rather than the original on failure, deliberately: silently storing an
-    /// *unfiltered* photo when the user picked a look is the same class of lie as a preview
-    /// that disagrees with the file, and the caller can decide what to do about it.
-    static func apply(_ tone: CameraTone, to data: Data, quality: CGFloat = 0.9) -> (data: Data, fileExtension: String)? {
-        guard !tone.isNeutral else { return (data, CapturedPhotoDecoder.fileExtension(for: data)) }
-        guard let source = CIImage(data: data) else { return nil }
-
-        let matrix = tone.colorMatrix
-        let filtered = source.applyingFilter("CIColorMatrix", parameters: Self.parameters(for: matrix))
-
-        // The extent, not the whole plane: a filter output is conceptually infinite, and
-        // encoding without saying where to stop produces nothing.
-        guard let encoded = context.jpegRepresentation(
-            of: filtered.cropped(to: source.extent),
-            colorSpace: source.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
-            options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: quality]
-        ) else { return nil }
-
-        return (encoded, "jpg")
-    }
 
     // MARK: - Filter strip thumbnails
 
@@ -95,10 +64,22 @@ enum ToneRenderer {
         // frame or two, and this keeps "resumed exactly once" a property of one lock instead
         // of careful reasoning about which of a timeout and a 30 Hz callback got there first —
         // a continuation resumed twice is a crash, and dropped is a strip that never appears.
+        //
+        // The sleep is **not** `try?`, and that is the whole of a bug worth more than the line
+        // it took. `Task.sleep` throws immediately once the task is cancelled, so swallowing
+        // that error turned this into a spin loop running flat out for the rest of the timeout —
+        // on `.userInitiated`, at exactly the moment the task gets cancelled, which is when the
+        // shelf is dismissed. Tapping from the filter strip to the censor picker therefore
+        // dropped a second of CPU on the floor while the GPU was being handed a new look, and
+        // the symptom was a viewfinder that froze and a control that appeared not to work.
         let deadline = ContinuousClock.now.advanced(by: timeout)
         while ContinuousClock.now < deadline {
             if let image = box.image { return image }
-            try? await Task.sleep(for: .milliseconds(16))
+            do {
+                try await Task.sleep(for: .milliseconds(16))
+            } catch {
+                return box.image
+            }
         }
         return box.image
     }
@@ -120,22 +101,6 @@ enum ToneRenderer {
             lock.lock()
             if stored == nil { stored = image }
             lock.unlock()
-        }
-    }
-
-    /// Each look applied to the same base image.
-    ///
-    /// One render per tone, off the main actor, once when the strip opens — not per frame. A
-    /// live-updating thumbnail per filter is what Instagram trained everyone to expect and it
-    /// costs a scaled render per filter per frame to decorate a strip that is open for two
-    /// seconds, while the viewfinder behind it is already showing the selected look at full
-    /// size.
-    static func thumbnails(base: CGImage, tones: [CameraTone]) -> [CGImage] {
-        let source = CIImage(cgImage: base)
-        return tones.map { tone in
-            guard !tone.isNeutral else { return base }
-            let filtered = source.applyingFilter("CIColorMatrix", parameters: parameters(for: tone.colorMatrix))
-            return context.createCGImage(filtered, from: source.extent) ?? base
         }
     }
 

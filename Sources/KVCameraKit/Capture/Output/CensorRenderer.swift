@@ -26,18 +26,23 @@ enum CensorRenderer {
         .useSoftwareRenderer: false
     ])
 
+    // The four numbers below are duplicated in `CameraPreview.metal`, by necessity — a shader
+    // cannot read Swift. They are `internal` rather than `private` so `CameraLookParityTests` can
+    // read them back and assert the shader still agrees: the censor's shape drifting between the
+    // viewfinder and the file is invisible in a diff and does not fail a build.
+
     /// Cells across the face, matching `kMosaicCells` in the shader.
-    private static let mosaicCells: CGFloat = 9
+    static let mosaicCells: CGFloat = 9
     /// Blur radius as a fraction of the face's semi-axis. Proportional to the face, so the
     /// same look holds at every distance — the shader's tap grid is in the same units for the
     /// same reason.
-    private static let blurFraction: CGFloat = 0.35
+    static let blurFraction: CGFloat = 0.35
     /// The bar, in the ellipse's own frame, matching `kBarHalfExtent`/`kBarCenterY`. The sign
     /// of the centre is flipped because Core Image's y runs up.
-    private static let barHalfExtent = CGSize(width: 1.02, height: 0.275)
-    private static let barCenterY: CGFloat = 0.175
+    static let barHalfExtent = CGSize(width: 1.02, height: 0.275)
+    static let barCenterY: CGFloat = 0.175
     /// Where the feather starts, matching the shader's `smoothstep(0.86, 1.0, …)`.
-    private static let featherStart: CGFloat = 0.86
+    static let featherStart: CGFloat = 0.86
 
     // MARK: - Rendering
 
@@ -46,12 +51,54 @@ enum CensorRenderer {
     /// `regions` are in normalized sensor-buffer coordinates — see `CensorRegion`. That is the
     /// space `image` is in for all three callers: a video frame is the raw buffer, and a still
     /// is the raw buffer plus an EXIF tag that `CIImage(data:)` deliberately does not apply.
+    ///
+    /// Both halves, for the video path, which has no grading stage to sit between them.
     static func render(
         image: CIImage,
         mode: CameraCensorMode,
         regions: [CensorRegion]
     ) -> CIImage {
-        guard mode.isEnabled, !regions.isEmpty else { return image }
+        renderBar(image: renderDestructive(image: image, mode: mode, regions: regions), mode: mode, regions: regions)
+    }
+
+    /// Mosaic and blur — the stages that consume the picture's own pixels.
+    ///
+    /// Split from the bar so a caller with a grading stage can put each on the correct side of
+    /// it. These two go **before** tone and the LUT: they are spatial averages, so they have to
+    /// read ungraded pixels, and running them first means the censored patch is graded along
+    /// with everything around it instead of sitting in the picture as an un-toned rectangle.
+    ///
+    /// The shader does exactly this, in `applyCensor`. The two used to disagree — the shader
+    /// censored before grading and the still path after — and each carried a comment claiming it
+    /// matched the other.
+    static func renderDestructive(
+        image: CIImage,
+        mode: CameraCensorMode,
+        regions: [CensorRegion]
+    ) -> CIImage {
+        guard mode == .mosaic || mode == .blur else { return image }
+        return reduce(image: image, mode: mode, regions: regions)
+    }
+
+    /// The bar — an opaque object placed **on top of** the finished picture.
+    ///
+    /// After grading, so it is black. Before, a strong preset tinted it: Film Noir produced a
+    /// dark grey bar in the viewfinder and a black one in the file, from the same censor mode.
+    static func renderBar(
+        image: CIImage,
+        mode: CameraCensorMode,
+        regions: [CensorRegion]
+    ) -> CIImage {
+        guard mode == .censorBar else { return image }
+        return reduce(image: image, mode: mode, regions: regions)
+    }
+
+    private static func reduce(
+        image: CIImage,
+        mode: CameraCensorMode,
+        regions: [CensorRegion]
+    ) -> CIImage {
+        guard !regions.isEmpty else { return image }
 
         let extent = image.extent
         guard extent.width > 1, extent.height > 1, extent.isInfinite == false else { return image }
@@ -61,6 +108,46 @@ enum CensorRenderer {
             output = censored(output, region: region, mode: mode, extent: extent)
         }
         return output
+    }
+
+    /// The union of the destructive regions, as a white-on-black mask.
+    ///
+    /// Beauty multiplies its skin mask by the inverse of this. Smoothing or sharpening inside a
+    /// censored patch would be sampling detail back into the one region whose entire purpose is
+    /// not to have any — the shader avoids it by reading the censor's own coverage value, and
+    /// this is the same guard for the Core Image path.
+    ///
+    /// `nil` when there is nothing to mask, so the caller can skip a composite rather than
+    /// blend against a black rectangle.
+    static func destructiveCoverageMask(
+        mode: CameraCensorMode,
+        regions: [CensorRegion],
+        extent: CGRect
+    ) -> CIImage? {
+        guard mode == .mosaic || mode == .blur, !regions.isEmpty else { return nil }
+        guard extent.width > 1, extent.height > 1, !extent.isInfinite else { return nil }
+
+        var mask: CIImage?
+        for region in regions {
+            let ellipse = CensorGeometry.coreImageEllipse(region, in: extent.size)
+            let radius = ellipse.radius
+            guard radius.width > 1, radius.height > 1 else { continue }
+            let placement = CGAffineTransform(rotationAngle: ellipse.roll)
+                .concatenating(CGAffineTransform(
+                    translationX: ellipse.center.x + extent.minX,
+                    y: ellipse.center.y + extent.minY
+                ))
+            let next = featheredMask(placement: placement, radius: radius)
+            // Lighten rather than add: two overlapping faces must not produce a mask brighter
+            // than white, which would push the inverse below zero.
+            mask = mask.map {
+                next.applyingFilter("CILightenBlendMode", parameters: [kCIInputBackgroundImageKey: $0])
+            } ?? next
+        }
+
+        return mask?
+            .composited(over: CIImage(color: .black).cropped(to: extent))
+            .cropped(to: extent)
     }
 
     private static func censored(

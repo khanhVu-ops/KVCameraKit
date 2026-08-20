@@ -25,3 +25,34 @@
 "Warm" = "따뜻하게";
 "Cool" = "차갑게";
 "Mono" = "모노";
+
+/* Phase 2 look shelves, film simulations, LUTs and beauty control. */
+"Styles" = "스타일";
+"Film" = "필름";
+"LUT" = "LUT";
+"Beauty" = "뷰티";
+"Beauty intensity" = "뷰티 강도";
+"Smooth" = "매끄럽게";
+"Brighten" = "밝게";
+"Rosy" = "생기";
+"Define" = "선명하게";
+"Portra 400" = "Portra 400";
+"Fuji Superia" = "Fuji Superia";
+"Cinestill 800T" = "Cinestill 800T";
+"Polaroid" = "Polaroid";
+"Vintage Y2K" = "Vintage Y2K";
+"Teal & Orange" = "틸 & 오렌지";
+"Cyberpunk" = "사이버펑크";
+"Film Noir" = "필름 누아르";
+"Warm Sunset" = "따뜻한 노을";
+
+/* The unified look shelf: one panel with the censor beside the looks, so a header can
+   name every stage that is currently changing the picture. */
+"Mosaic" = "모자이크";
+"Blur" = "흐리게";
+"Censor Bar" = "검은 막대";
+"Privacy" = "개인 정보";
+"No look applied" = "적용된 효과 없음";
+"Reset look" = "효과 초기화";
+"Faces are covered in the photo and the video, not just on screen" = "화면뿐 아니라 사진과 동영상에도 얼굴이 가려집니다";
+"Face censoring is unavailable in this build" = "이 빌드에서는 얼굴 가리기를 사용할 수 없습니다";

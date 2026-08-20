@@ -105,7 +105,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
     init(
         recordingEngine: CameraRecordingEngine = .movieFile,
-        previewEngine: CameraPreviewEngine = .system
+        previewEngine: CameraPreviewEngine = .metal
     ) {
         self.recordingEngine = recordingEngine
         self.previewEngine = previewEngine
@@ -203,6 +203,41 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         }
     }
 
+    /// Session queue only, inside a configuration block.
+    ///
+    /// Chooses the device's `activeFormat` explicitly instead of letting `sessionPreset = .photo`
+    /// choose it — and only for the Metal viewfinder, which is the only engine that draws the
+    /// video data output's frames.
+    ///
+    /// This is the fix for "the preview is softer than the stock camera", which it was: under the
+    /// photo preset the video data output delivers a preview-sized stream, so the Metal path was
+    /// upscaling a 1080-line image by about 1.8x to fill a modern screen. `AVCaptureVideoPreviewLayer`
+    /// never pays that, because it is fed by the pipeline rather than by an output.
+    ///
+    /// A preset cannot express "sharper video *and* full-size stills", so the preset goes. See
+    /// `CameraFormatSelector` for what is being maximised, and note that `maxPhotoDimensions` has
+    /// to be set on the output afterwards — its default is the format's *video* dimensions, which
+    /// on the sharper format would be a smaller photograph than before.
+    private func applyPreviewFormatLocked(to device: AVCaptureDevice) {
+        guard previewEngine.needsFrames else { return }
+        guard let format = CameraFormatSelector.format(for: device) else { return }
+        guard format != device.activeFormat else { return }
+
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            // A device that will not lock keeps whatever the preset gave it. Softer than it
+            // could be is a great deal better than a session that failed to configure.
+            return
+        }
+        defer { device.unlockForConfiguration() }
+
+        // Setting `activeFormat` puts the session into `.inputPriority` by itself; saying so
+        // first stops AVFoundation from applying the preset over the top on the next commit.
+        session.sessionPreset = .inputPriority
+        device.activeFormat = format
+    }
+
     private var hardwareControlLabels: CameraControlLabels?
     private var requestedExposureBias: Float = 0.0
 
@@ -269,13 +304,14 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
         session.addInput(input)
         videoInput = input
+        applyPreviewFormatLocked(to: device)
 
         // No microphone here. It is attached when the user picks VIDEO — see
         // `setAudioEnabled`.
 
         if session.canAddOutput(photo.output) {
             session.addOutput(photo.output)
-            photo.configureOutput()
+            photo.configureOutput(device: device)
         }
 
         // Deliberately one or the other, never both. `AVCaptureMovieFileOutput` and
@@ -373,6 +409,12 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             videoInput = newInput
             activeDevice = newDevice
             currentPosition = newPosition
+            // The format belongs to the device, so it is chosen again rather than inherited.
+            // Front and back sensors offer different ones, and a session left on
+            // `.inputPriority` with no format set for the new input runs in whatever that
+            // device's default happens to be.
+            applyPreviewFormatLocked(to: newDevice)
+            photo.configureOutput(device: newDevice)
         } else if let currentInput = videoInput {
             session.addInput(currentInput)
         }
@@ -649,18 +691,10 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         let raw = try await photo.capture(flashMode: flashMode, on: sessionQueue)
         #endif
 
-        guard censorMode.isEnabled, isCensorSupported, let rawPhoto = raw else {
-            return raw
-        }
-
-        if let censored = CensorRenderer.apply(censorMode, to: rawPhoto.data) {
-            let censoredPreview = rawPhoto.preview.flatMap { CensorRenderer.apply(censorMode, to: $0)?.data }
-            return CapturedPhoto(
-                data: censored.data,
-                preview: censoredPreview,
-                fileExtension: censored.fileExtension
-            )
-        }
+        // The ViewModel applies the complete still recipe in one place: Tone -> LUT ->
+        // Beauty -> Censor. Censoring here used to be correct while it was the only pixel
+        // effect, but would now put it before smoothing and force the preview/full image path
+        // to be rendered twice.
         return raw
     }
 

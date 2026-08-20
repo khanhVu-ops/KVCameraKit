@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreGraphics
 import MetalKit
+import QuartzCore
 import SwiftUI
 
 /// The Metal viewfinder, as a SwiftUI view.
@@ -14,10 +15,10 @@ struct MetalCameraPreviewView: UIViewRepresentable {
     /// Mirrored for the front camera: a preview of your own face is a mirror in every camera
     /// app, while the captured file is not.
     let isMirrored: Bool
-    /// The look. Composed into a matrix here rather than per frame, and handed to the same
-    /// renderer that draws — the still path gets the same matrix, so the photo and the
-    /// viewfinder cannot disagree.
-    let tone: CameraTone
+    /// Tone, LUT and film texture for the selected look.
+    let filter: CameraFilter
+    /// Skin smoothing composes with the selected look rather than replacing it.
+    let beauty: CameraBeauty
     /// The censor look. The geometry it applies to arrives separately, and for a different
     /// reason — see `censorRegions`.
     let censorMode: CameraCensorMode
@@ -40,17 +41,30 @@ struct MetalCameraPreviewView: UIViewRepresentable {
         let view = MTKView()
         view.device = MTLCreateSystemDefaultDevice()
         view.colorPixelFormat = .bgra8Unorm
+        // The shader emits display-referred sRGB values. Without a layer color space Core
+        // Animation treats them as untagged device RGB, which is visibly different from the
+        // system preview on a wide-gamut display.
+        (view.layer as? CAMetalLayer)?.colorspace = CGColorSpace(name: CGColorSpace.sRGB)
         // Nothing reads the drawable back, so Metal may discard it after presenting.
         view.framebufferOnly = true
         view.isOpaque = true
         view.backgroundColor = .black
 
         // Driven by the display, pulling whatever the newest frame is, rather than the frame
-        // queue calling `draw()` directly. A camera always has a next frame, so the wasted
-        // work is a redraw of an identical texture — cheap — and in exchange there is no
-        // cross-thread drawing to reason about. `MTKView` is not documented as safe to drive
-        // from an arbitrary queue, and a viewfinder is a poor place to find out.
-        view.preferredFramesPerSecond = 60
+        // queue calling `draw()` directly: `MTKView` is not documented as safe to drive from an
+        // arbitrary queue, and a viewfinder is a poor place to find out.
+        //
+        // Asking for the display's full rate is deliberate now that it is cheap. The renderer
+        // returns immediately from a `draw` whose frame and look are both unchanged, so a 30 fps
+        // camera on a 120 Hz screen costs one rendered frame in four and three early returns —
+        // and the moment a stream *does* run faster, or the device is turned, the viewfinder is
+        // already asking often enough to show it. The old value of 60 was doing the opposite:
+        // re-shading an identical frame at twice the camera's rate, with the entire look in the
+        // fragment shader.
+        //
+        // `MTKView` clamps this to what the display can actually do, so 120 means "as fast as
+        // this screen goes" without asking a deprecated `UIScreen` which display that is.
+        view.preferredFramesPerSecond = 120
         view.delegate = context.coordinator
         context.coordinator.attach(to: view)
 
@@ -68,7 +82,7 @@ struct MetalCameraPreviewView: UIViewRepresentable {
 
     func updateUIView(_ uiView: MTKView, context: Context) {
         context.coordinator.renderer?.isMirrored = isMirrored
-        context.coordinator.renderer?.toneMatrix = tone.colorMatrix
+        context.coordinator.renderer?.configure(filter: filter, beauty: beauty)
         context.coordinator.renderer?.censorMode = censorMode
         context.coordinator.renderer?.censorRegions = censorRegions
         context.coordinator.onTapToFocus = onTapToFocus

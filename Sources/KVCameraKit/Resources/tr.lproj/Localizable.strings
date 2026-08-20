@@ -25,3 +25,34 @@
 "Warm" = "Sıcak";
 "Cool" = "Soğuk";
 "Mono" = "Mono";
+
+/* Phase 2 look shelves, film simulations, LUTs and beauty control. */
+"Styles" = "Stiller";
+"Film" = "Film";
+"LUT" = "LUT";
+"Beauty" = "Güzellik";
+"Beauty intensity" = "Güzellik yoğunluğu";
+"Smooth" = "Pürüzsüz";
+"Brighten" = "Aydınlat";
+"Rosy" = "Canlandır";
+"Define" = "Belirgin";
+"Portra 400" = "Portra 400";
+"Fuji Superia" = "Fuji Superia";
+"Cinestill 800T" = "Cinestill 800T";
+"Polaroid" = "Polaroid";
+"Vintage Y2K" = "Vintage Y2K";
+"Teal & Orange" = "Turkuaz ve Turuncu";
+"Cyberpunk" = "Siberpunk";
+"Film Noir" = "Kara Film";
+"Warm Sunset" = "Sıcak Gün Batımı";
+
+/* The unified look shelf: one panel with the censor beside the looks, so a header can
+   name every stage that is currently changing the picture. */
+"Mosaic" = "Mozaik";
+"Blur" = "Bulanıklık";
+"Censor Bar" = "Sansür bandı";
+"Privacy" = "Gizlilik";
+"No look applied" = "Görünüm uygulanmadı";
+"Reset look" = "Görünümü sıfırla";
+"Faces are covered in the photo and the video, not just on screen" = "Yüzler yalnızca ekranda değil, fotoğrafta ve videoda da kapatılır";
+"Face censoring is unavailable in this build" = "Yüz sansürü bu sürümde kullanılamıyor";

@@ -25,3 +25,34 @@
 "Warm" = "โทนอุ่น";
 "Cool" = "โทนเย็น";
 "Mono" = "โมโน";
+
+/* Phase 2 look shelves, film simulations, LUTs and beauty control. */
+"Styles" = "สไตล์";
+"Film" = "ฟิล์ม";
+"LUT" = "LUT";
+"Beauty" = "บิวตี้";
+"Beauty intensity" = "ระดับบิวตี้";
+"Smooth" = "เรียบเนียน";
+"Brighten" = "สว่าง";
+"Rosy" = "อมชมพู";
+"Define" = "คมชัด";
+"Portra 400" = "Portra 400";
+"Fuji Superia" = "Fuji Superia";
+"Cinestill 800T" = "Cinestill 800T";
+"Polaroid" = "Polaroid";
+"Vintage Y2K" = "Vintage Y2K";
+"Teal & Orange" = "ทีลและส้ม";
+"Cyberpunk" = "ไซเบอร์พังก์";
+"Film Noir" = "ฟิล์มนัวร์";
+"Warm Sunset" = "พระอาทิตย์ตกโทนอุ่น";
+
+/* The unified look shelf: one panel with the censor beside the looks, so a header can
+   name every stage that is currently changing the picture. */
+"Mosaic" = "โมเสก";
+"Blur" = "เบลอ";
+"Censor Bar" = "แถบเซ็นเซอร์";
+"Privacy" = "ความเป็นส่วนตัว";
+"No look applied" = "ยังไม่ได้ใช้ลุค";
+"Reset look" = "รีเซ็ตลุค";
+"Faces are covered in the photo and the video, not just on screen" = "ใบหน้าจะถูกปิดทั้งในภาพถ่ายและวิดีโอ ไม่ใช่แค่บนหน้าจอ";
+"Face censoring is unavailable in this build" = "การปิดใบหน้าไม่พร้อมใช้งานในบิลด์นี้";

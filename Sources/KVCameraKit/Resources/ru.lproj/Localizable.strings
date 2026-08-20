@@ -25,3 +25,34 @@
 "Warm" = "Тёплый";
 "Cool" = "Холодный";
 "Mono" = "Моно";
+
+/* Phase 2 look shelves, film simulations, LUTs and beauty control. */
+"Styles" = "Стили";
+"Film" = "Плёнка";
+"LUT" = "LUT";
+"Beauty" = "Ретушь";
+"Beauty intensity" = "Интенсивность ретуши";
+"Smooth" = "Сглаживание";
+"Brighten" = "Осветление";
+"Rosy" = "Румянец";
+"Define" = "Чёткость";
+"Portra 400" = "Portra 400";
+"Fuji Superia" = "Fuji Superia";
+"Cinestill 800T" = "Cinestill 800T";
+"Polaroid" = "Polaroid";
+"Vintage Y2K" = "Vintage Y2K";
+"Teal & Orange" = "Бирюзовый и оранжевый";
+"Cyberpunk" = "Киберпанк";
+"Film Noir" = "Нуар";
+"Warm Sunset" = "Тёплый закат";
+
+/* The unified look shelf: one panel with the censor beside the looks, so a header can
+   name every stage that is currently changing the picture. */
+"Mosaic" = "Мозаика";
+"Blur" = "Размытие";
+"Censor Bar" = "Чёрная полоса";
+"Privacy" = "Конфиденциальность";
+"No look applied" = "Стиль не применён";
+"Reset look" = "Сбросить стиль";
+"Faces are covered in the photo and the video, not just on screen" = "Лица скрыты на фото и видео, а не только на экране";
+"Face censoring is unavailable in this build" = "Скрытие лиц недоступно в этой сборке";

@@ -25,3 +25,34 @@
 "Warm" = "دافئ";
 "Cool" = "بارد";
 "Mono" = "أحادي";
+
+/* Phase 2 look shelves, film simulations, LUTs and beauty control. */
+"Styles" = "الأنماط";
+"Film" = "فيلم";
+"LUT" = "LUT";
+"Beauty" = "الجمال";
+"Beauty intensity" = "مستوى تنعيم البشرة";
+"Smooth" = "تنعيم";
+"Brighten" = "تفتيح";
+"Rosy" = "وردي";
+"Define" = "إبراز";
+"Portra 400" = "Portra 400";
+"Fuji Superia" = "Fuji Superia";
+"Cinestill 800T" = "Cinestill 800T";
+"Polaroid" = "Polaroid";
+"Vintage Y2K" = "Vintage Y2K";
+"Teal & Orange" = "تركوازي وبرتقالي";
+"Cyberpunk" = "سايبربانك";
+"Film Noir" = "فيلم نوار";
+"Warm Sunset" = "غروب دافئ";
+
+/* The unified look shelf: one panel with the censor beside the looks, so a header can
+   name every stage that is currently changing the picture. */
+"Mosaic" = "موزاييك";
+"Blur" = "تمويه";
+"Censor Bar" = "شريط حجب";
+"Privacy" = "الخصوصية";
+"No look applied" = "لم يتم تطبيق أي مظهر";
+"Reset look" = "إعادة تعيين المظهر";
+"Faces are covered in the photo and the video, not just on screen" = "الوجوه مغطاة في الصورة والفيديو، وليس على الشاشة فقط";
+"Face censoring is unavailable in this build" = "حجب الوجوه غير متوفر في هذا الإصدار";

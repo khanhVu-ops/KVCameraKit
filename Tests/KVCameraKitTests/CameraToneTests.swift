@@ -124,7 +124,14 @@ final class CameraToneTests: XCTestCase {
 
     // MARK: - Parity with the still path
 
-    /// Core Image, through the real `ToneRenderer`, has to produce what the matrix says.
+    /// A filter that is nothing but this tone, so the assertion is on the matrix and not on a
+    /// preset's LUT or film texture.
+    private static func filter(with tone: CameraTone) -> CameraFilter {
+        CameraFilter(id: "test-tone", title: .cameraKit("Original"), tone: tone)
+    }
+
+
+    /// Core Image, through the real still path, has to produce what the matrix says.
     ///
     /// This is the whole reason the tone is a matrix. It goes through the production call —
     /// including its unmanaged colour space, which is the detail that makes the numbers
@@ -142,7 +149,10 @@ final class CameraToneTests: XCTestCase {
             CameraFilter.vivid.tone,
             CameraFilter.cool.tone
         ] {
-            let filtered = try XCTUnwrap(ToneRenderer.apply(tone, to: jpeg), "the still path produced nothing")
+            let filtered = try XCTUnwrap(
+                CameraLookRenderer.apply(filter: Self.filter(with: tone), beauty: .off, to: jpeg),
+                "the still path produced nothing"
+            )
             XCTAssertEqual(filtered.fileExtension, "jpg", "a filtered photo is a re-encode and must say so")
 
             let actual = try Self.centrePixel(of: filtered.data)
@@ -163,12 +173,12 @@ final class CameraToneTests: XCTestCase {
     /// identity matrix would degrade every unfiltered photo the app takes.
     func test_aNeutralToneReturnsTheOriginalBytesUntouched() throws {
         let jpeg = try Self.solidJPEG(rgb: SIMD3<Float>(0.4, 0.55, 0.7))
-        let result = try XCTUnwrap(ToneRenderer.apply(.neutral, to: jpeg))
+        let result = try XCTUnwrap(CameraLookRenderer.apply(filter: .original, beauty: .off, to: jpeg))
         XCTAssertEqual(result.data, jpeg, "an unfiltered photo was re-encoded")
     }
 
     func test_bytesThatAreNotAnImageAreRefusedRatherThanPassedThrough() {
-        XCTAssertNil(ToneRenderer.apply(CameraFilter.vivid.tone, to: Data("not an image".utf8)))
+        XCTAssertNil(CameraLookRenderer.apply(filter: .vivid, beauty: .off, to: Data("not an image".utf8)))
     }
 
     /// `CIColorMatrix` reads the transform out by rows, with the offset in its own vector —

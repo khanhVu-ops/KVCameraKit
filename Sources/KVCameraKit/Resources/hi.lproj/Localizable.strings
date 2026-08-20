@@ -25,3 +25,34 @@
 "Warm" = "गर्म";
 "Cool" = "ठंडा";
 "Mono" = "मोनो";
+
+/* Phase 2 look shelves, film simulations, LUTs and beauty control. */
+"Styles" = "शैलियाँ";
+"Film" = "फ़िल्म";
+"LUT" = "LUT";
+"Beauty" = "ब्यूटी";
+"Beauty intensity" = "ब्यूटी की तीव्रता";
+"Smooth" = "स्मूद";
+"Brighten" = "चमक";
+"Rosy" = "गुलाबी";
+"Define" = "स्पष्ट";
+"Portra 400" = "Portra 400";
+"Fuji Superia" = "Fuji Superia";
+"Cinestill 800T" = "Cinestill 800T";
+"Polaroid" = "Polaroid";
+"Vintage Y2K" = "Vintage Y2K";
+"Teal & Orange" = "टील और ऑरेंज";
+"Cyberpunk" = "साइबरपंक";
+"Film Noir" = "फ़िल्म नॉयर";
+"Warm Sunset" = "गर्म सूर्यास्त";
+
+/* The unified look shelf: one panel with the censor beside the looks, so a header can
+   name every stage that is currently changing the picture. */
+"Mosaic" = "मोज़ेक";
+"Blur" = "धुंधला";
+"Censor Bar" = "सेंसर पट्टी";
+"Privacy" = "निजता";
+"No look applied" = "कोई लुक लागू नहीं";
+"Reset look" = "लुक रीसेट करें";
+"Faces are covered in the photo and the video, not just on screen" = "चेहरे फ़ोटो और वीडियो में भी ढके जाते हैं, केवल स्क्रीन पर नहीं";
+"Face censoring is unavailable in this build" = "इस बिल्ड में चेहरा ढकना उपलब्ध नहीं है";

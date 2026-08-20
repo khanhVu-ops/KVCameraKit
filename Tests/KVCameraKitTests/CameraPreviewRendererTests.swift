@@ -277,6 +277,35 @@ final class CameraPreviewRendererTests: XCTestCase {
         }
     }
 
+    func test_yCbCrMatrixFollowsTheBufferAttachment() {
+        XCTAssertEqual(
+            CameraPreviewRenderer.ycbcrStandard(
+                attachment: kCVImageBufferYCbCrMatrix_ITU_R_601_4,
+                width: 1_920
+            ),
+            .bt601
+        )
+        XCTAssertEqual(
+            CameraPreviewRenderer.ycbcrStandard(
+                attachment: kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+                width: 640
+            ),
+            .bt709
+        )
+        XCTAssertEqual(
+            CameraPreviewRenderer.ycbcrStandard(
+                attachment: kCVImageBufferYCbCrMatrix_ITU_R_2020,
+                width: 1_920
+            ),
+            .bt2020
+        )
+    }
+
+    func test_missingYCbCrAttachmentUsesResolutionFallback() {
+        XCTAssertEqual(CameraPreviewRenderer.ycbcrStandard(attachment: nil, width: 640), .bt601)
+        XCTAssertEqual(CameraPreviewRenderer.ycbcrStandard(attachment: nil, width: 1_920), .bt709)
+    }
+
     /// White and black have to land on the ends, or the whole range is shifted.
     func test_fullRangeWhiteAndBlackLandOnTheEnds() {
         let matrix = CameraPreviewRenderer.ycbcrToRGB(isFullRange: true)
