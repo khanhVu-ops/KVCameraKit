@@ -256,6 +256,14 @@ struct CameraContentView: View {
                             .transition(.move(edge: .top).combined(with: .opacity))
                     }
 
+                    // The frame tap's numbers, beside the viewfinder it runs beside. Debug
+                    // builds only — see `CameraFrameStatisticsHUD` for why it is also the
+                    // tap's first consumer.
+                    #if DEBUG
+                    CameraFrameStatisticsHUD(frames: cameraService.frames)
+                        .padding(.top, theme.spacingS)
+                    #endif
+
                     Spacer()
 
                     bottomControls

@@ -479,6 +479,11 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
     private(set) var didResetFocus = false
     private(set) var installedLabels: CameraControlLabels?
 
+    /// Frames are not what this stub exists to exercise — the fan-out has its own tests —
+    /// but the protocol requires one, and handing back a real source keeps `StubCamera`
+    /// honest about the shape of the thing it stands in for.
+    let frames: any FrameSource = StubFrameSource()
+
     func setupSession() async -> Bool { setupResult }
     func stopSession() { didStopSession = true }
     func switchCamera() async { switchCount += 1 }
@@ -524,5 +529,17 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
             context.fill(CGRect(x: 0, y: 0, width: side, height: side))
         }
         return image.jpegData(compressionQuality: 0.9) ?? Data()
+    }
+}
+
+/// A frame source that never produces a frame.
+///
+/// The camera screen does not read frames yet, so the correct stand-in here is one that stays
+/// silent: a stub that invented a stream would make every ViewModel test pay for a timer.
+private final class StubFrameSource: FrameSource, @unchecked Sendable {
+    var statistics = FrameStatistics()
+
+    func addConsumer(_ consumer: @escaping FrameConsumer) -> FrameSubscription {
+        FrameSubscription {}
     }
 }

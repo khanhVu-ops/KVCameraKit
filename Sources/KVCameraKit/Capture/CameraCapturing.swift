@@ -152,4 +152,11 @@ protocol CameraCapturing: AnyObject, Sendable {
     /// Publishes zoom, exposure and the self-timer to Camera Control. A no-op where the
     /// hardware has no such button.
     func installHardwareControls(labels: CameraControlLabels) async
+
+    /// Frames off the sensor, for whoever needs pixels rather than a viewfinder.
+    ///
+    /// Alongside `session`, not instead of it: the preview layer keeps drawing exactly as
+    /// before, and nothing reads this until a scanner, a Metal preview, a recorder or a
+    /// filter does. Nothing is attached to the session until the first consumer subscribes.
+    var frames: any FrameSource { get }
 }

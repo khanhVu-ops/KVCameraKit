@@ -39,6 +39,9 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     private let sessionQueue = DispatchQueue(label: "com.iosvault.camera.sessionQueue")
 
     private let photo = PhotoCaptureCoordinator()
+    /// Built in `init` rather than lazily, because it needs the session and the queue that
+    /// serialises it. Constructing it attaches nothing — see `CameraFrameTap.addConsumer`.
+    private var frameTap: FrameSource!
     private let movie = MovieRecordingCoordinator()
     private let audio = CameraAudioSession()
     private var hardwareControls: CameraHardwareControls!
@@ -61,6 +64,16 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
                 self?.onHardwareControlChange?(change)
             }
         )
+
+        // The simulator has no session at all, so a real `AVCaptureVideoDataOutput` could
+        // never deliver a frame there — and every step that comes after this one needs
+        // frames. Same trade as `SimulatedCapture`: a synthetic stream keeps the work
+        // runnable, and says nothing about performance, which only a device can.
+        #if targetEnvironment(simulator)
+        frameTap = SimulatedFrameSource()
+        #else
+        frameTap = CameraFrameTap(session: session, sessionQueue: sessionQueue)
+        #endif
 
         rotation = CameraRotationController(
             applyCaptureAngle: { [weak self] angle in
@@ -312,7 +325,14 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         rotation.refresh(for: activeDevice)
     }
 
+    var frames: any FrameSource { frameTap }
+
     private func applyCaptureRotation(_ angle: CGFloat) {
+        // The tap reports this per frame. Same coordinator, same angle as the preview layer —
+        // a frame pipeline that derived its own orientation would be a second source of truth
+        // for which way is up, and the two would disagree in landscape.
+        (frameTap as? CameraFrameTap)?.setRotationAngle(angle)
+
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             for output in [self.photo.output as AVCaptureOutput, self.movie.output as AVCaptureOutput] {
