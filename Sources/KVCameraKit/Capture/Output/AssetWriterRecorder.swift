@@ -1,13 +1,23 @@
 import AVFoundation
 import CoreMedia
 import Foundation
+import UniformTypeIdentifiers
 
-/// Writes a video file by appending samples, instead of letting AVFoundation do it.
+/// Writes a video by appending samples, instead of letting AVFoundation do it.
 ///
 /// The point is what it makes possible rather than what it does better. With
 /// `AVCaptureMovieFileOutput` the app never sees the bytes: it cannot record filtered frames,
 /// and it cannot encrypt as it writes — it can only wait for a finished plaintext file and
 /// re-read it. Appending samples ourselves is the precondition for both.
+///
+/// It writes to one of two destinations, and the second is the reason the first exists:
+///
+/// - `.file` — a `.mov`, finished on disk. AVFoundation rewrites the header at the end, which
+///   is exactly why this cannot be streamed.
+/// - `.stream` — a **fragmented MP4**, handed over segment by segment as the encoder produces
+///   them. An initialization segment then self-contained media segments, so concatenating
+///   what arrives *is* the file. Nothing is ever written to disk here, which for a host that
+///   encrypts means no plaintext ever exists outside memory.
 ///
 /// Every guard in here is against a specific way a real-time writer produces a file that is
 /// empty, truncated or a second short, all of which look like success at the call site.
@@ -42,6 +52,20 @@ final class AssetWriterRecorder: @unchecked Sendable {
 
     private(set) var outputURL: URL?
 
+    /// Where the bytes go. Held rather than passed, because the answer is needed on the
+    /// delegate callback as well as at stop.
+    private enum Destination {
+        case file(URL)
+        /// Called in delivery order, on AVFoundation's queue. Must not block.
+        case stream(@Sendable (Data) -> Void)
+    }
+
+    private var destination: Destination = .file(URL(fileURLWithPath: "/dev/null"))
+
+    /// Retained because `AVAssetWriter.delegate` is weak, and a deallocated delegate is
+    /// simply a recording that produces no segments — with nothing logged.
+    private var segmentDelegate: SegmentDelegate?
+
     // MARK: - Lifecycle
 
     /// Whether an audio track should be created at all.
@@ -54,19 +78,68 @@ final class AssetWriterRecorder: @unchecked Sendable {
     /// genuinely playable.
     private var includesAudio = true
 
-    /// Prepares the writer. The session itself starts on the first video sample.
+    /// Prepares a writer that finishes a file. The session itself starts on the first video
+    /// sample.
     func start(to url: URL, transform: CGAffineTransform, includesAudio: Bool = true) {
         writerQueue.sync {
             try? FileManager.default.removeItem(at: url)
 
             guard let writer = try? AVAssetWriter(outputURL: url, fileType: .mov) else { return }
-            self.writer = writer
+            self.begin(with: writer, destination: .file(url), transform: transform, includesAudio: includesAudio)
             self.outputURL = url
-            self.transform = transform
-            self.includesAudio = includesAudio
-            self.hasStartedSession = false
-            self.isRecording = true
         }
+    }
+
+    /// Prepares a writer that emits fragmented-MP4 segments instead of a file.
+    ///
+    /// `onSegment` receives the initialization segment first and each media segment after it,
+    /// in order. Concatenated, they are the recording.
+    func startStreaming(
+        transform: CGAffineTransform,
+        includesAudio: Bool,
+        onSegment: @escaping @Sendable (Data) -> Void
+    ) {
+        writerQueue.sync {
+            let delegate = SegmentDelegate(onSegment: onSegment)
+
+            let writer = AVAssetWriter(contentType: UTType.mpeg4Movie)
+            // Segment output only happens with a profile that defines what a segment is.
+            // `.mpeg4AppleHLS` is the one that permits audio and video in the same segment —
+            // measured, because the CMAF profile's one-track-per-file rule would split a
+            // recording in two and leave the sound to be re-muxed later.
+            writer.outputFileTypeProfile = .mpeg4AppleHLS
+            // Two seconds. This is the unit of *everything* about streaming: how much is held
+            // in memory at once, how much is lost if the app dies mid-recording, and how
+            // often the encoder is forced to emit a keyframe. Shorter costs bitrate for
+            // keyframes nobody asked for; longer holds more plaintext in memory for longer.
+            writer.preferredOutputSegmentInterval = CMTime(seconds: 2, preferredTimescale: 1)
+            writer.delegate = delegate
+
+            self.segmentDelegate = delegate
+            self.begin(with: writer, destination: .stream(onSegment), transform: transform, includesAudio: includesAudio)
+            self.outputURL = nil
+        }
+    }
+
+    /// Writer queue only. The half both destinations share.
+    private func begin(
+        with writer: AVAssetWriter,
+        destination: Destination,
+        transform: CGAffineTransform,
+        includesAudio: Bool
+    ) {
+        self.writer = writer
+        self.destination = destination
+        self.transform = transform
+        self.includesAudio = includesAudio
+        self.hasStartedSession = false
+        self.isRecording = true
+        self.videoInput = nil
+        self.audioInput = nil
+        self.firstVideoTime = nil
+        self.lastVideoEndTime = nil
+        self.videoDimensions = nil
+        self.posterData = nil
     }
 
     /// The rotation to bake into the track, from the same coordinator that drives the preview.
@@ -76,13 +149,20 @@ final class AssetWriterRecorder: @unchecked Sendable {
     /// does for free. Players and editors honour it.
     private var transform: CGAffineTransform = .identity
 
-    /// Finishes the file and returns it, or `nil` if nothing was ever written.
+    /// Facts about the recording that only the recorder is in a position to know, gathered as
+    /// the samples go past. Writer queue only.
+    private var firstVideoTime: CMTime?
+    private var lastVideoEndTime: CMTime?
+    private var videoDimensions: CMVideoDimensions?
+    private var posterData: Data?
+
+    /// Finishes the recording, or returns `nil` if nothing was ever written.
     ///
     /// The `nil` matters: a stop with no samples produces a valid `AVAssetWriter` that has
     /// written a file with no tracks, and handing that to the vault stores an unplayable
     /// artifact that looks exactly like a successful recording.
-    func stop() async -> URL? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<URL?, Never>) in
+    func stop() async -> RecordingOutput? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<RecordingOutput?, Never>) in
             writerQueue.async { [weak self] in
                 guard let self else {
                     continuation.resume(returning: nil)
@@ -102,20 +182,57 @@ final class AssetWriterRecorder: @unchecked Sendable {
                 self.audioInput?.markAsFinished()
 
                 writer.finishWriting {
-                    let url = writer.status == .completed ? self.outputURL : nil
                     self.writerQueue.async {
+                        let output = writer.status == .completed ? self.finishedOutput() : nil
                         self.reset()
-                        continuation.resume(returning: url)
+                        continuation.resume(returning: output)
                     }
                 }
             }
         }
     }
 
+    /// Writer queue only.
+    private func finishedOutput() -> RecordingOutput? {
+        switch destination {
+        case .file:
+            guard let url = outputURL else { return nil }
+            return .file(url)
+
+        case .stream:
+            return .stream(CaptureVideoSummary(
+                fileExtension: "mp4",
+                byteCount: segmentDelegate?.byteCount ?? 0,
+                duration: recordedDuration(),
+                pixelWidth: orientedDimensions()?.width,
+                pixelHeight: orientedDimensions()?.height,
+                posterData: posterData
+            ))
+        }
+    }
+
+    /// Measured from the samples' own timestamps rather than from a wall clock, which
+    /// includes however long the writer was being set up.
+    private func recordedDuration() -> TimeInterval? {
+        guard let start = firstVideoTime, let end = lastVideoEndTime else { return nil }
+        let seconds = (end - start).seconds
+        return seconds.isFinite && seconds > 0 ? seconds : nil
+    }
+
+    /// The track is rotated by a transform, so its stored dimensions are pre-rotation: a
+    /// portrait recording reports landscape until the transform is applied.
+    private func orientedDimensions() -> (width: Int, height: Int)? {
+        guard let dimensions = videoDimensions else { return nil }
+        let oriented = CGSize(width: CGFloat(dimensions.width), height: CGFloat(dimensions.height))
+            .applying(transform)
+        return (Int(abs(oriented.width.rounded())), Int(abs(oriented.height.rounded())))
+    }
+
     private func reset() {
         writer = nil
         videoInput = nil
         audioInput = nil
+        segmentDelegate = nil
         hasStartedSession = false
         outputURL = nil
     }
@@ -147,6 +264,7 @@ final class AssetWriterRecorder: @unchecked Sendable {
             // the session preset can change them at runtime.
             guard let description = CMSampleBufferGetFormatDescription(sampleBuffer) else { return }
             let dimensions = CMVideoFormatDescriptionGetDimensions(description)
+            videoDimensions = dimensions
             videoInput = makeVideoInput(width: Int(dimensions.width), height: Int(dimensions.height))
             if let videoInput, writer.canAdd(videoInput) {
                 writer.add(videoInput)
@@ -154,6 +272,8 @@ final class AssetWriterRecorder: @unchecked Sendable {
         }
 
         guard let videoInput else { return }
+
+        let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
         if !hasStartedSession {
             guard writer.status == .unknown else { return }
@@ -167,13 +287,32 @@ final class AssetWriterRecorder: @unchecked Sendable {
                     audioInput = input
                 }
             }
+            // Also before `startWriting`, and only meaningful when segmenting: the writer
+            // stamps segment boundaries relative to this, and a value that disagrees with the
+            // session start puts the first media segment before the file begins.
+            if case .stream = destination {
+                writer.initialSegmentStartTime = presentationTime
+            }
             guard writer.startWriting() else { return }
-            writer.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            writer.startSession(atSourceTime: presentationTime)
             hasStartedSession = true
+            firstVideoTime = presentationTime
+
+            // The poster comes from the first frame that actually made it into the file, and
+            // from *this* side of the encoder — a streamed recording has no file left to
+            // decode one out of.
+            posterData = CapturePosterRenderer.jpeg(from: sampleBuffer, transform: transform)
         }
 
         guard writer.status == .writing, videoInput.isReadyForMoreMediaData else { return }
         videoInput.append(sampleBuffer)
+
+        // Duration is the end of the last frame, not its start — otherwise every recording
+        // is one frame short, which is invisible until someone compares it to the timer.
+        let sampleDuration = CMSampleBufferGetDuration(sampleBuffer)
+        lastVideoEndTime = sampleDuration.isValid && sampleDuration.isNumeric
+            ? presentationTime + sampleDuration
+            : presentationTime
     }
 
     /// Writer queue only.
@@ -235,5 +374,47 @@ final class AssetWriterRecorder: @unchecked Sendable {
         // Floored so a tiny preview-sized capture still gets a usable rate, and capped so a
         // 4K source does not ask for something the encoder will refuse.
         return Int(min(max(scaled, 1_000_000), 40_000_000))
+    }
+
+    // MARK: - Segments
+
+    /// Forwards each segment and counts the bytes.
+    ///
+    /// A separate object rather than a conformance on the recorder, for two reasons: the
+    /// callback arrives on AVFoundation's own queue rather than the writer queue, so keeping
+    /// it here keeps that boundary visible, and it saves making the recorder an `NSObject`
+    /// only to satisfy a delegate protocol.
+    private final class SegmentDelegate: NSObject, AVAssetWriterDelegate {
+        private let onSegment: @Sendable (Data) -> Void
+        private let lock = NSLock()
+        /// `nonisolated(unsafe)` because `AVAssetWriterDelegate` is `Sendable`, so the
+        /// compiler wants this immutable — and it cannot see that the lock below is what
+        /// makes it safe. The alternative, an actor, cannot conform: the delegate callback is
+        /// synchronous.
+        nonisolated(unsafe) private var bytes = 0
+
+        init(onSegment: @escaping @Sendable (Data) -> Void) {
+            self.onSegment = onSegment
+        }
+
+        /// Read from the writer queue at stop, written on AVFoundation's queue — hence the
+        /// lock rather than the queue this class does not own.
+        var byteCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return bytes
+        }
+
+        func assetWriter(
+            _ writer: AVAssetWriter,
+            didOutputSegmentData segmentData: Data,
+            segmentType: AVAssetSegmentType,
+            segmentReport: AVAssetSegmentReport?
+        ) {
+            lock.lock()
+            bytes += segmentData.count
+            lock.unlock()
+            onSegment(segmentData)
+        }
     }
 }

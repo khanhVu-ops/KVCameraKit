@@ -81,4 +81,24 @@ public protocol CameraArtifactHandler: Sendable {
     /// The newest thumbnail already in the host's library, for the corner button on
     /// appearance. `nil` when there is nothing yet.
     func latestThumbnail() async -> Data?
+
+    /// A destination for video bytes as they are produced, or `nil` if this host would
+    /// rather be handed a finished `CaptureArtifact`.
+    ///
+    /// Optional on purpose. `store` is the simple contract and stays the default, because a
+    /// host that just drops a clip into the camera roll gains nothing from streaming and
+    /// would have to implement it to compile. A host that *encrypts* gains the entire point
+    /// of it: see `CaptureVideoSink`.
+    ///
+    /// Called once per recording, before the first frame. Throwing here refuses the
+    /// recording outright — which is the right answer when the destination cannot be opened,
+    /// and much better than the alternative it replaces: falling back to a plaintext file
+    /// because the vault happened to be locked.
+    func makeVideoSink() async throws -> (any CaptureVideoSink)?
+}
+
+public extension CameraArtifactHandler {
+    /// No streaming destination. The recorder writes a file and `store` is handed the
+    /// finished artifact, exactly as before this existed.
+    func makeVideoSink() async throws -> (any CaptureVideoSink)? { nil }
 }

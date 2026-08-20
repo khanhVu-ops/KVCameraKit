@@ -155,6 +155,17 @@ final class CameraViewModel {
     @ObservationIgnored private var recordingTask: Task<Void, Never>?
     @ObservationIgnored private var countdownTask: Task<Void, Never>?
 
+    /// Whether a recording streams to the host or produces a file. Kept here as well as in
+    /// the service because the *destination* is opened before recording starts, and only the
+    /// screen can ask the host for one.
+    @ObservationIgnored private let recordingEngine: CameraRecordingEngine
+    /// The host's destination for the recording in flight.
+    @ObservationIgnored private var videoSink: (any CaptureVideoSink)?
+    /// Opening the destination is asynchronous — a key to generate, a file to create — so a
+    /// stop can arrive before the start finished. Awaiting this is what stops a recording
+    /// being started after it was ended.
+    @ObservationIgnored private var recordingStartTask: Task<Void, Never>?
+
     init(
         handler: any CameraArtifactHandler,
         onDismiss: @escaping () -> Void,
@@ -163,6 +174,7 @@ final class CameraViewModel {
     ) {
         self.handler = handler
         self.onDismiss = onDismiss
+        self.recordingEngine = recordingEngine
         // The engine reaches the service at construction because it decides which outputs go
         // on the session, which cannot be changed once a recording is in flight.
         self.cameraService = cameraService ?? CameraService(recordingEngine: recordingEngine)
@@ -198,9 +210,21 @@ final class CameraViewModel {
             }
 
         case .onDisappear:
-            stopRecordingTimer()
             stopCountdown()
-            cameraService.stopSession()
+            // A recording in flight is *finished*, not abandoned. It used to be dropped, which
+            // silently lost the clip; with a streaming destination it would also leave the
+            // host holding a half-written item nobody ever completes. The session is stopped
+            // afterwards, because stopping it first races the writer — and only then, because
+            // with nothing recording there is nothing to wait for.
+            if state.isRecording {
+                Task {
+                    await finishRecordingIfNeeded()
+                    cameraService.stopSession()
+                }
+            } else {
+                stopRecordingTimer()
+                cameraService.stopSession()
+            }
 
         case .scenePhaseChanged(let isActive):
             if isActive {
@@ -213,10 +237,16 @@ final class CameraViewModel {
                     }
                 }
             } else {
-                stopRecordingTimer()
                 stopCountdown()
-                state.isRecording = false
-                cameraService.stopSession()
+                if state.isRecording {
+                    Task {
+                        await finishRecordingIfNeeded()
+                        cameraService.stopSession()
+                    }
+                } else {
+                    stopRecordingTimer()
+                    cameraService.stopSession()
+                }
             }
 
         case .setMode(let mode):
@@ -525,11 +555,30 @@ final class CameraViewModel {
     }
 
     private func startVideoRecording() {
-        let tempURL = Self.temporaryRecordingURL()
-        cameraService.startRecording(to: tempURL)
+        // The UI commits to recording on this line, before the destination is open. The
+        // opposite order would mean a shutter that does nothing for as long as it takes the
+        // host to generate a key and create a file — and `recordingStartTask` is what keeps a
+        // stop in that window honest.
         state.isRecording = true
         state.recordingDurationSeconds = 0
         CameraHaptic.medium.play()
+
+        recordingStartTask = Task {
+            do {
+                cameraService.startRecording(to: try await makeRecordingDestination())
+            } catch {
+                // Refused rather than diverted. The one destination this must never silently
+                // fall back to is a plaintext file, which is exactly what a locked vault would
+                // have produced.
+                state.isRecording = false
+                stopRecordingTimer()
+                state.alert = CameraAlert(
+                    title: .cameraKit("Error"),
+                    message: .cameraKit("Video could not be saved")
+                )
+                CameraHaptic.error.play()
+            }
+        }
 
         recordingTask?.cancel()
         recordingTask = Task { @MainActor in
@@ -541,37 +590,94 @@ final class CameraViewModel {
         }
     }
 
+    /// Where this recording's bytes go.
+    ///
+    /// Streaming is asked for by the engine and granted by the host: an engine that streams
+    /// still falls back to a file when `makeVideoSink` returns `nil`, because a host that has
+    /// not implemented one is not an error. A host that *throws* is — that is a destination
+    /// it meant to provide and could not, and the recording is refused.
+    private func makeRecordingDestination() async throws -> RecordingDestination {
+        guard recordingEngine.streamsToHost else {
+            return .file(Self.temporaryRecordingURL())
+        }
+        guard let sink = try await handler.makeVideoSink() else {
+            return .file(Self.temporaryRecordingURL())
+        }
+        videoSink = sink
+        return .stream(sink)
+    }
+
     private func stopVideoRecording() {
+        Task { await finishRecordingIfNeeded() }
+    }
+
+    /// Ends the recording in flight and commits it. Safe to call when there is none.
+    ///
+    /// One function rather than three, because leaving the screen, backgrounding the app and
+    /// tapping the shutter all have to do exactly the same thing — and the two that used to
+    /// take a shortcut simply lost the clip.
+    private func finishRecordingIfNeeded() async {
+        guard state.isRecording else { return }
+
         stopRecordingTimer()
         state.isRecording = false
         CameraHaptic.medium.play()
-
         state.isSealing = true
 
-        Task {
-            do {
-                guard let outputURL = try await cameraService.stopRecording() else {
-                    state.isSealing = false
-                    return
-                }
+        // A stop can overtake the start: the destination is opened asynchronously.
+        await recordingStartTask?.value
+        recordingStartTask = nil
 
-                let artifact = try await VideoArtifactReader.consume(at: outputURL)
+        let sink = videoSink
+        videoSink = nil
+
+        do {
+            guard let output = try await cameraService.stopRecording() else {
+                // Nothing was recorded — not an error, but the destination that was opened for
+                // it has to be discarded or the host keeps an empty item.
+                await sink?.cancel()
+                state.isSealing = false
+                return
+            }
+
+            switch output {
+            case .file(let url):
+                let artifact = try await VideoArtifactReader.consume(at: url)
                 if let poster = artifact.previewData {
                     state.latestCapturedThumbnailData = poster
                     state.captureStage = .flying(CaptureFlight(id: UUID(), imageData: poster))
                 }
-
                 let receipt = try await handler.store([artifact])
                 if let thumbnail = receipt.thumbnailData {
                     state.latestCapturedThumbnailData = thumbnail
                 }
-                state.isSealing = false
-                CameraHaptic.success.play()
-            } catch {
-                state.isSealing = false
-                state.alert = CameraAlert(title: .cameraKit("Error"), message: .cameraKit("Video could not be saved"))
-                CameraHaptic.error.play()
+
+            case .stream(let summary):
+                guard let sink else {
+                    state.isSealing = false
+                    return
+                }
+                // The poster was taken from the first frame of the recording, so unlike the
+                // file path there is nothing to decode and the card can fly immediately.
+                if let poster = summary.posterData {
+                    state.latestCapturedThumbnailData = poster
+                    state.captureStage = .flying(CaptureFlight(id: UUID(), imageData: poster))
+                }
+                let receipt = try await sink.finish(summary)
+                if let thumbnail = receipt.thumbnailData {
+                    state.latestCapturedThumbnailData = thumbnail
+                }
             }
+
+            state.isSealing = false
+            CameraHaptic.success.play()
+        } catch {
+            // Whatever reached the host is incomplete, and a truncated recording that looks
+            // stored is worse than one that failed loudly.
+            await sink?.cancel()
+            state.isSealing = false
+            state.alert = CameraAlert(title: .cameraKit("Error"), message: .cameraKit("Video could not be saved"))
+            CameraHaptic.error.play()
         }
     }
 

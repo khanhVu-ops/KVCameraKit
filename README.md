@@ -27,6 +27,22 @@ CameraScreen(
 )
 ```
 
+For video there is a second, optional shape of that boundary. A host that encrypts what it
+stores can implement `makeVideoSink()` and receive the recording **as it is made** —
+fragmented-MP4 segments, one at a time — instead of a finished file:
+
+```swift
+func makeVideoSink() async throws -> (any CaptureVideoSink)? {
+    MySink()                      // write(_:) per segment, then finish(summary)
+}                                 // nil — the default — means "hand me a file instead"
+```
+
+The difference is not an optimisation. `AVCaptureMovieFileOutput` never lets the app see a
+byte, so the only way to encrypt a recording was to let AVFoundation finish a plaintext file
+and read it back — which for a five-minute 4K clip means a gigabyte of plaintext on disk plus
+two more copies of it in memory. With a sink, peak memory is one segment and nothing
+unencrypted is ever written. It needs `CameraRecordingEngine.streamingAssetWriter`.
+
 That boundary is the reason the package exists. It was extracted from an encrypted-vault
 app once it became clear the camera would keep growing — modes, live filters, a scanner,
 editing — and that in a single module nothing stops a camera reaching for the app's fonts
@@ -52,6 +68,21 @@ port for the things that need pixels — a scanner, a Metal preview, an `AVAsset
 recorder, live filters — and it attaches an `AVCaptureVideoDataOutput` only when someone
 actually subscribes. A screen that only takes photos pays nothing.
 
+**A recording can be written without ever existing as a file.** `.streamingAssetWriter`
+runs `AVAssetWriter` in fragmented mode: an initialization segment and then self-contained
+media segments, handed to the host's `CaptureVideoSink` as the encoder produces them, so
+concatenating what arrives *is* the file. A `.mov` cannot do this — it is finalised by
+rewriting its header at the end — which is why the streamed container is an fMP4. The
+`.mpeg4AppleHLS` profile is the one that permits audio and video in the same segment;
+that is asserted in the tests rather than trusted, because the alternative profile would
+silently produce a recording with no sound.
+
+**There are three recording engines, and the default is the oldest one.** A viewfinder that
+regresses is obvious immediately; a recorder that regresses is discovered after the moment is
+gone. `.movieFile` (AVFoundation owns everything) ships as the default, `.assetWriter` writes
+the file itself, `.streamingAssetWriter` streams it — and moving between them is one line, in
+either direction.
+
 **A delivered frame is valid only inside its callback.** `AVCaptureVideoDataOutput` hands
 back buffers from a fixed pool; retain one and it leaves the pool, and when the pool
 empties AVFoundation simply stops delivering. No error, no log — the viewfinder freezes
@@ -74,10 +105,10 @@ photo.
 Capture/
   CameraService            the CameraCapturing façade: session, device, queue
   Device/                  zoom ladder · device discovery · focus/exposure/torch
-  Output/                  photo capture · movie recording · JPEG decoding
+  Output/                  photo capture · movie recording · asset writer · segment pump
   Session/                 audio · rotation · interruptions · Camera Control
   Frames/                  FrameSource · frame tap · statistics
-Core/                      CaptureArtifact · CameraMode · theme · haptics · alerts
+Core/                      CaptureArtifact · CaptureVideoSink · CameraMode · theme · haptics
 UI/                        CameraScreen · CameraViewModel · components
 Resources/                 19 × Localizable.strings
 ```
@@ -90,7 +121,8 @@ performance, which only a device can answer, but they keep the screen inspectabl
 
 ## Tests
 
-44 tests, none of which need a camera.
+96 tests, none of which need a camera — including a recording written, streamed, and read
+back as a playable asset entirely from synthesised sample buffers.
 
 ```bash
 xcodebuild -scheme KVCameraKit -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test

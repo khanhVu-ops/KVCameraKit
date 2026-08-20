@@ -27,6 +27,28 @@ struct CapturedPhoto: Sendable {
     let fileExtension: String
 }
 
+/// Where a recording's bytes are going.
+///
+/// Decided per recording rather than at construction, because it depends on something only
+/// the host can answer: whether it could open a destination at all. The engine flag decides
+/// which of these is *asked for* — see `CameraRecordingEngine.streamsToHost`.
+enum RecordingDestination: Sendable {
+    /// A file the recorder finishes and hands back.
+    case file(URL)
+    /// The host takes the bytes as they are produced. Nothing is written to disk.
+    case stream(any CaptureVideoSink)
+}
+
+/// What a stopped recording produced.
+///
+/// Two cases rather than an optional URL, so the compiler makes every caller say what it
+/// does with a streamed recording. There is no file to fall back on there: the bytes have
+/// already gone to the host, and what comes back is what is known *about* them.
+enum RecordingOutput: Sendable {
+    case file(URL)
+    case stream(CaptureVideoSummary)
+}
+
 /// Something the user did with Camera Control — the capacitive button below the side
 /// button on an iPhone 16 and later.
 ///
@@ -144,8 +166,11 @@ protocol CameraCapturing: AnyObject, Sendable {
     func setExposureBias(_ bias: Float)
     func setTorch(on: Bool)
     func capturePhoto() async throws -> CapturedPhoto?
-    func startRecording(to outputURL: URL)
-    func stopRecording() async throws -> URL?
+    func startRecording(to destination: RecordingDestination)
+    /// `nil` when nothing was recorded — which is a real outcome, not an error: a writer
+    /// that never received a sample would otherwise finish a valid, trackless file, and
+    /// storing that gives the user an unplayable item indistinguishable from a recording.
+    func stopRecording() async throws -> RecordingOutput?
 
     /// Handed the live preview layer so rotation can be driven from one
     /// `RotationCoordinator` instead of a hard-coded `.portrait` on every connection.

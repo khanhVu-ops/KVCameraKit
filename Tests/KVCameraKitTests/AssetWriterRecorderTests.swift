@@ -13,9 +13,19 @@ final class AssetWriterRecorderTests: XCTestCase {
 
     // MARK: - The engine flag
 
-    func test_onlyTheAssetWriterEngineUsesSampleBuffers() {
+    func test_onlyTheAssetWriterEnginesUseSampleBuffers() {
         XCTAssertFalse(CameraRecordingEngine.movieFile.usesSampleBuffers)
         XCTAssertTrue(CameraRecordingEngine.assetWriter.usesSampleBuffers)
+        XCTAssertTrue(CameraRecordingEngine.streamingAssetWriter.usesSampleBuffers)
+    }
+
+    /// Only one engine sends the bytes to the host, and the screen asks this before it opens a
+    /// destination. Getting it wrong on `.movieFile` would mean asking the vault for a sink
+    /// that never receives a byte.
+    func test_onlyTheStreamingEngineStreamsToTheHost() {
+        XCTAssertFalse(CameraRecordingEngine.movieFile.streamsToHost)
+        XCTAssertFalse(CameraRecordingEngine.assetWriter.streamsToHost)
+        XCTAssertTrue(CameraRecordingEngine.streamingAssetWriter.streamsToHost)
     }
 
     // MARK: - stop()
@@ -98,7 +108,7 @@ final class AssetWriterRecorderTests: XCTestCase {
         }
 
         let stopped = await recorder.stop()
-        let finished = try XCTUnwrap(stopped, "the writer produced no file")
+        let finished = try Self.fileURL(of: XCTUnwrap(stopped, "the writer produced no file"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: finished.path))
 
         let asset = AVURLAsset(url: finished)
@@ -132,7 +142,7 @@ final class AssetWriterRecorderTests: XCTestCase {
         }
 
         let stopped = await recorder.stop()
-        let finished = try XCTUnwrap(stopped)
+        let finished = try Self.fileURL(of: XCTUnwrap(stopped))
         let asset = AVURLAsset(url: finished)
         let tracks = try await asset.loadTracks(withMediaType: .video)
         let track = try XCTUnwrap(tracks.first)
@@ -144,6 +154,136 @@ final class AssetWriterRecorderTests: XCTestCase {
         XCTAssertEqual(transform.c, -1, accuracy: 0.0001)
 
         try? FileManager.default.removeItem(at: finished)
+    }
+
+    // MARK: - Streaming
+
+    /// The streamed path, end to end: segments out, a playable file when they are put back
+    /// together.
+    ///
+    /// This is the assertion the whole step rests on. A fragmented MP4 is only a file if the
+    /// initialization segment comes first and the media segments keep their order — and
+    /// "encrypted, stored, and unopenable" is a failure the user would meet long after the
+    /// recording was possible to repeat.
+    func test_streamingProducesSegmentsThatConcatenateIntoAPlayableFile() async throws {
+        let recorder = AssetWriterRecorder()
+        let collected = SegmentLog()
+
+        recorder.startStreaming(transform: .identity, includesAudio: true) { collected.append($0) }
+
+        for index in 0..<70 {
+            recorder.appendVideo(CameraFrame(
+                sampleBuffer: try Self.videoSample(index: Int64(index)),
+                rotationAngle: 0
+            ))
+            recorder.appendAudio(try Self.silentAudioSample(index: Int64(index)))
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let stopped = await recorder.stop()
+        guard case .stream(let summary) = try XCTUnwrap(stopped, "the writer produced nothing") else {
+            return XCTFail("a streaming recorder must not report a file")
+        }
+
+        let segments = collected.snapshot()
+        // More than one, or the segment interval never took effect and the whole clip was
+        // buffered to the end — which is the thing this replaces.
+        XCTAssertGreaterThan(segments.count, 1, "no segmentation happened")
+        XCTAssertEqual(summary.byteCount, segments.reduce(0) { $0 + $1.count })
+        XCTAssertEqual(summary.fileExtension, "mp4")
+
+        var blob = Data()
+        for segment in segments { blob.append(segment) }
+        let url = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("Streamed_\(UUID().uuidString).mp4")
+        try blob.write(to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let asset = AVURLAsset(url: url)
+        let duration = try await asset.load(.duration)
+        XCTAssertGreaterThan(duration.seconds, 0, "the concatenation is not a playable file")
+
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(videoTracks.count, 1)
+        // The reason this profile was chosen over the CMAF one, asserted rather than trusted:
+        // a profile that refused muxed media would silently produce a recording with no sound.
+        XCTAssertEqual(audioTracks.count, 1, "audio and video have to share one fragmented file")
+
+        // The facts the host cannot work out for itself once the bytes are encrypted.
+        XCTAssertEqual(summary.pixelWidth, 640)
+        XCTAssertEqual(summary.pixelHeight, 480)
+        let reportedDuration = try XCTUnwrap(summary.duration)
+        XCTAssertEqual(reportedDuration, duration.seconds, accuracy: 0.5)
+        XCTAssertNotNil(summary.posterData, "no poster means no thumbnail for the library")
+    }
+
+    /// A rotated recording reports rotated dimensions.
+    ///
+    /// The track stores its size pre-rotation, so a portrait clip measures landscape until the
+    /// transform is applied — and the host writes whatever it is told into the item's metadata,
+    /// where it decides the aspect ratio of every grid cell.
+    func test_streamedDimensionsAreOriented() async throws {
+        let recorder = AssetWriterRecorder()
+        recorder.startStreaming(
+            transform: CameraService.transform(forCaptureAngle: 90),
+            includesAudio: false
+        ) { _ in }
+
+        for index in 0..<20 {
+            recorder.appendVideo(CameraFrame(
+                sampleBuffer: try Self.videoSample(index: Int64(index)),
+                rotationAngle: 90
+            ))
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let stopped = await recorder.stop()
+        guard case .stream(let summary) = try XCTUnwrap(stopped) else {
+            return XCTFail("expected a streamed recording")
+        }
+        XCTAssertEqual(summary.pixelWidth, 480)
+        XCTAssertEqual(summary.pixelHeight, 640)
+    }
+
+    /// A streamed recording with no video is nothing, and must emit nothing.
+    ///
+    /// Same guard as the file path, and it matters more here: the host has already opened a
+    /// destination, so a summary would commit an item whose only content is an
+    /// initialization segment — a file that exists, has no frames, and plays as nothing.
+    func test_streamingWithoutAVideoSampleProducesNoSegmentsAndNoSummary() async throws {
+        let recorder = AssetWriterRecorder()
+        let collected = SegmentLog()
+        recorder.startStreaming(transform: .identity, includesAudio: true) { collected.append($0) }
+
+        for index in 0..<10 {
+            recorder.appendAudio(try Self.silentAudioSample(index: Int64(index)))
+        }
+
+        let stopped = await recorder.stop()
+        XCTAssertNil(stopped)
+        XCTAssertTrue(collected.snapshot().isEmpty)
+    }
+
+    /// Segments reach the sink in the order they were produced, through the pump that keeps
+    /// AVFoundation's queue from waiting on the host's disk.
+    func test_thePumpPreservesOrderAndReportsAFailure() async throws {
+        let sink = RecordingSinkSpy()
+        let pump = CaptureStreamPump(sink: sink)
+        for index in 0..<50 { pump.enqueue(Data([UInt8(index)])) }
+        let failure = await pump.finish()
+
+        XCTAssertNil(failure)
+        XCTAssertEqual(sink.snapshot().map { $0.first }, (0..<50).map { UInt8($0) })
+
+        // And a sink that fails is reported rather than swallowed: the recording is gone, and
+        // the only thing worse than saying so is not saying so.
+        let failing = RecordingSinkSpy()
+        failing.failOnWrite = true
+        let failingPump = CaptureStreamPump(sink: failing)
+        failingPump.enqueue(Data([1]))
+        let reported = await failingPump.finish()
+        XCTAssertNotNil(reported)
     }
 
     // MARK: - Bitrate
@@ -195,6 +335,14 @@ final class AssetWriterRecorderTests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// The file a finished recording named, or a failure that explains which case arrived.
+    private static func fileURL(of output: RecordingOutput) throws -> URL {
+        guard case .file(let url) = output else {
+            throw XCTSkip("expected a file recording, got a streamed one")
+        }
+        return url
+    }
 
     private static func temporaryURL() -> URL {
         URL(fileURLWithPath: NSTemporaryDirectory())
@@ -296,4 +444,43 @@ final class AssetWriterRecorderTests: XCTestCase {
         )
         return try XCTUnwrap(sampleBuffer)
     }
+}
+
+/// Collects segments off whichever queue AVFoundation delivers them on.
+private final class SegmentLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var segments: [Data] = []
+
+    func append(_ segment: Data) {
+        lock.lock()
+        segments.append(segment)
+        lock.unlock()
+    }
+
+    func snapshot() -> [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return segments
+    }
+}
+
+/// A sink that keeps what it is given, and can be told to fail.
+private final class RecordingSinkSpy: CaptureVideoSink, @unchecked Sendable {
+    /// The pump calls `write` one at a time, so this needs no lock — which is itself part of
+    /// the contract being asserted.
+    nonisolated(unsafe) private var chunks: [Data] = []
+    nonisolated(unsafe) var failOnWrite = false
+
+    func write(_ chunk: Data) async throws {
+        if failOnWrite { throw CocoaError(.fileWriteOutOfSpace) }
+        chunks.append(chunk)
+    }
+
+    func finish(_ summary: CaptureVideoSummary) async throws -> CaptureReceipt {
+        CaptureReceipt(thumbnailData: nil)
+    }
+
+    func cancel() async {}
+
+    func snapshot() -> [Data] { chunks }
 }

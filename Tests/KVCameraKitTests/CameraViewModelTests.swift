@@ -400,14 +400,160 @@ final class CameraViewModelTests: XCTestCase {
 
     private var dismissCount = 0
 
+    // MARK: - Streaming a recording
+
+    /// The streaming engine asks the host for a destination, and hands it to the service.
+    ///
+    /// This is the whole point of the step: with `.file` the recorder writes a plaintext clip
+    /// to disk for the host to read back, and in an app that encrypts everything that file is
+    /// the one thing that must not exist.
+    func test_streamingEngineRecordsToTheHostsSink() async throws {
+        let camera = StubCamera()
+        let handler = StubHandler()
+        let sink = StubVideoSink()
+        handler.sink = sink
+        let viewModel = makeViewModel(camera: camera, handler: handler, recordingEngine: .streamingAssetWriter)
+
+        viewModel.send(.setMode(.video))
+        viewModel.send(.shutterTapped)
+        XCTAssertTrue(viewModel.state.isRecording)
+
+        try await waitUntil { camera.recordingDestination != nil }
+        guard case .stream = try XCTUnwrap(camera.recordingDestination) else {
+            return XCTFail("a streaming engine must not record to a file")
+        }
+
+        camera.recordingOutput = .stream(Self.summary)
+        viewModel.send(.shutterTapped)
+        try await waitUntil { sink.summary != nil }
+
+        XCTAssertEqual(handler.sinkRequests, 1)
+        // Committed through the sink, not through `store`: the bytes already went.
+        XCTAssertTrue(handler.stored.isEmpty)
+        XCTAssertEqual(viewModel.state.latestCapturedThumbnailData, StubVideoSink.thumbnail)
+        XCTAssertEqual(sink.cancelCount, 0)
+        XCTAssertFalse(viewModel.state.isSealing)
+    }
+
+    /// A host that has not implemented streaming still records, to a file.
+    ///
+    /// `makeVideoSink` is defaulted, so this is the behaviour of every host that only ever
+    /// implemented `store` — including the two other engines.
+    func test_aHostWithoutASinkFallsBackToAFile() async throws {
+        let camera = StubCamera()
+        let handler = StubHandler()      // sink is nil
+        let viewModel = makeViewModel(camera: camera, handler: handler, recordingEngine: .streamingAssetWriter)
+
+        viewModel.send(.setMode(.video))
+        viewModel.send(.shutterTapped)
+
+        try await waitUntil { camera.recordingDestination != nil }
+        guard case .file = try XCTUnwrap(camera.recordingDestination) else {
+            return XCTFail("a host that returns no sink has to be given a file")
+        }
+    }
+
+    /// A host that *cannot* open a destination refuses the recording.
+    ///
+    /// The distinction from the test above is the one that matters: `nil` means "I do not do
+    /// streaming", an error means "I do, and I could not" — a locked vault, a full disk. The
+    /// fallback there would be writing the user's video to disk in the clear.
+    func test_aSinkThatFailsToOpenRefusesTheRecording() async throws {
+        let camera = StubCamera()
+        let handler = StubHandler()
+        handler.sinkError = StubCameraError.failed
+        let viewModel = makeViewModel(camera: camera, handler: handler, recordingEngine: .streamingAssetWriter)
+
+        viewModel.send(.setMode(.video))
+        viewModel.send(.shutterTapped)
+
+        try await waitUntil { viewModel.state.alert != nil }
+        XCTAssertFalse(viewModel.state.isRecording)
+        XCTAssertNil(camera.recordingDestination, "nothing may be recorded anywhere")
+    }
+
+    /// A recording that produced nothing must not leave the host holding an open item.
+    func test_aRecordingThatProducedNothingCancelsTheSink() async throws {
+        let camera = StubCamera()
+        let handler = StubHandler()
+        let sink = StubVideoSink()
+        handler.sink = sink
+        let viewModel = makeViewModel(camera: camera, handler: handler, recordingEngine: .streamingAssetWriter)
+
+        viewModel.send(.setMode(.video))
+        viewModel.send(.shutterTapped)
+        try await waitUntil { camera.recordingDestination != nil }
+
+        camera.recordingOutput = nil     // the writer never received a sample
+        viewModel.send(.shutterTapped)
+
+        try await waitUntil { sink.cancelCount == 1 }
+        XCTAssertNil(sink.summary)
+        XCTAssertFalse(viewModel.state.isSealing)
+    }
+
+    /// A failure while stopping cancels the sink and says so.
+    func test_aFailedStopCancelsTheSinkAndAlerts() async throws {
+        let camera = StubCamera()
+        let handler = StubHandler()
+        let sink = StubVideoSink()
+        handler.sink = sink
+        let viewModel = makeViewModel(camera: camera, handler: handler, recordingEngine: .streamingAssetWriter)
+
+        viewModel.send(.setMode(.video))
+        viewModel.send(.shutterTapped)
+        try await waitUntil { camera.recordingDestination != nil }
+
+        camera.stopRecordingError = StubCameraError.failed
+        viewModel.send(.shutterTapped)
+
+        try await waitUntil { viewModel.state.alert != nil }
+        XCTAssertEqual(sink.cancelCount, 1, "a half-written recording must not be kept")
+        XCTAssertFalse(viewModel.state.isSealing)
+    }
+
+    /// Leaving the screen mid-recording finishes it instead of dropping it.
+    ///
+    /// It used to drop it, which silently lost the clip. With a streaming destination it would
+    /// also leave the host with an item nobody ever completes.
+    func test_leavingTheScreenWhileRecordingCommitsTheRecording() async throws {
+        let camera = StubCamera()
+        let handler = StubHandler()
+        let sink = StubVideoSink()
+        handler.sink = sink
+        let viewModel = makeViewModel(camera: camera, handler: handler, recordingEngine: .streamingAssetWriter)
+
+        viewModel.send(.setMode(.video))
+        viewModel.send(.shutterTapped)
+        try await waitUntil { camera.recordingDestination != nil }
+
+        camera.recordingOutput = .stream(Self.summary)
+        viewModel.send(.onDisappear)
+
+        try await waitUntil { sink.summary != nil }
+        XCTAssertFalse(viewModel.state.isRecording)
+        XCTAssertTrue(camera.didStopSession, "the session is stopped after the writer, not before")
+    }
+
+    private static let summary = CaptureVideoSummary(
+        fileExtension: "mp4",
+        byteCount: 4_096,
+        duration: 2.5,
+        pixelWidth: 1080,
+        pixelHeight: 1920,
+        posterData: Data("poster".utf8)
+    )
+
     private func makeViewModel(
         camera: StubCamera,
-        handler: StubHandler = StubHandler()
+        handler: StubHandler = StubHandler(),
+        recordingEngine: CameraRecordingEngine = .movieFile
     ) -> CameraViewModel {
         CameraViewModel(
             handler: handler,
             onDismiss: { [weak self] in self?.dismissCount += 1 },
-            cameraService: camera
+            cameraService: camera,
+            recordingEngine: recordingEngine
         )
     }
 
@@ -452,6 +598,36 @@ private final class StubHandler: CameraArtifactHandler, @unchecked Sendable {
     }
 
     func latestThumbnail() async -> Data? { latest }
+
+    /// `nil` by default, which is the answer for a host that only implements `store` — and
+    /// the reason `makeVideoSink` has a default implementation at all.
+    var sink: StubVideoSink?
+    var sinkError: Error?
+    private(set) var sinkRequests = 0
+
+    func makeVideoSink() async throws -> (any CaptureVideoSink)? {
+        sinkRequests += 1
+        if let sinkError { throw sinkError }
+        return sink
+    }
+}
+
+/// A streaming destination that keeps what it was given.
+private final class StubVideoSink: CaptureVideoSink, @unchecked Sendable {
+    static let thumbnail = Data("sink".utf8)
+
+    private(set) var chunks: [Data] = []
+    private(set) var summary: CaptureVideoSummary?
+    private(set) var cancelCount = 0
+
+    func write(_ chunk: Data) async throws { chunks.append(chunk) }
+
+    func finish(_ summary: CaptureVideoSummary) async throws -> CaptureReceipt {
+        self.summary = summary
+        return CaptureReceipt(thumbnailData: Self.thumbnail)
+    }
+
+    func cancel() async { cancelCount += 1 }
 }
 
 /// A camera that needs no device.
@@ -499,8 +675,16 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
     func resetFocusAndExposure() { didResetFocus = true }
     func setExposureBias(_ bias: Float) {}
     func setTorch(on: Bool) {}
-    func startRecording(to outputURL: URL) {}
-    func stopRecording() async throws -> URL? { nil }
+    private(set) var recordingDestination: RecordingDestination?
+    /// What a stop hands back. `nil` is the real "nothing was recorded" outcome.
+    var recordingOutput: RecordingOutput?
+    var stopRecordingError: Error?
+
+    func startRecording(to destination: RecordingDestination) { recordingDestination = destination }
+    func stopRecording() async throws -> RecordingOutput? {
+        if let stopRecordingError { throw stopRecordingError }
+        return recordingOutput
+    }
     @MainActor func attachPreviewLayer(_ layer: AVCaptureVideoPreviewLayer) {}
     func installHardwareControls(labels: CameraControlLabels) async { installedLabels = labels }
 

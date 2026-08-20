@@ -6,6 +6,77 @@ All notable changes to KVCameraKit are documented in this file.
 
 Nothing yet.
 
+## 1.4.0 - 2026-08-20
+
+### Added
+
+- **A recording can now be written without ever existing as a file.**
+  `CameraRecordingEngine.streamingAssetWriter` runs `AVAssetWriter` in fragmented mode and
+  hands each segment to the host through a new optional boundary, `CaptureVideoSink`:
+
+  ```swift
+  func makeVideoSink() async throws -> (any CaptureVideoSink)?   // nil = give me a file
+  ```
+
+  This is what 1.3.0 existed to make possible. With `AVCaptureMovieFileOutput` the app never
+  sees a byte, so the only way to encrypt a recording was to let AVFoundation finish a
+  plaintext file and read it back: for a five-minute 4K clip, a gigabyte of plaintext on disk
+  plus two more copies of it in memory, inside an app whose entire promise is that there are
+  none. Peak memory is now one segment, and nothing unencrypted is written at all.
+
+  `makeVideoSink` is defaulted to `nil`, so every existing host compiles unchanged and keeps
+  receiving finished `CaptureArtifact` values.
+
+- `CaptureVideoSummary` — the facts about a recording that only exist once it has stopped:
+  duration, byte count, oriented dimensions, and a poster frame. It arrives at `finish`,
+  which is the whole difference from `CaptureArtifact`: a streaming host has to be able to
+  open a destination *before* any of them are known.
+
+- `CapturePosterRenderer`. The poster used to come from `AVAssetImageGenerator` decoding the
+  finished file; a streamed recording is encrypted by the time it lands, so there is nothing
+  to decode. It is now taken from the first frame that goes *into* the file — which is also
+  the better frame, being the moment the user pressed record.
+
+### Changed
+
+- **`CameraCapturing.startRecording`/`stopRecording` take and return a destination rather
+  than a URL.** `RecordingDestination` is `.file` or `.stream`; `RecordingOutput` is
+  `.file(URL)` or `.stream(CaptureVideoSummary)`. Two cases rather than an optional URL so
+  the compiler makes every caller say what it does with a streamed recording — there is no
+  file to fall back on.
+
+- **Leaving the camera or backgrounding the app while recording now finishes the recording
+  instead of dropping it.** It used to flip `isRecording` to `false` and stop the session,
+  which silently lost the clip — and with a streaming destination would also leave the host
+  holding an item nobody ever completes. All three ways of ending a recording go through one
+  function now.
+
+- A destination that **fails to open** refuses the recording, with an alert. Only `nil` —
+  "this host does not do streaming" — falls back to a file. The distinction matters more than
+  it looks: the fallback for a host that *meant* to stream and could not would be writing the
+  user's video to disk in the clear, which is exactly the case a locked vault produces.
+
+### Notes
+
+Measured rather than assumed, because both would have failed quietly:
+
+`AVAssetWriter`'s HLS profile does accept audio and video in one fragmented file. The CMAF
+profile's one-track-per-file rule would have split a recording in two and left the audio to
+be re-muxed later, and the failure mode of picking wrong is a recording with no sound. There
+is a test that concatenates the segments and asserts two tracks.
+
+Segments are two seconds. That interval is the unit of everything about streaming — how much
+plaintext is in memory at once, how much is lost if the app dies mid-recording, and how often
+the encoder is forced to emit a keyframe. What a simulator cannot answer is what the extra
+per-segment keyframes cost in bitrate on real hardware, or how a host's disk writes behave
+while a 4K encode is running: the segment pump is unbounded precisely because sealing a
+segment is memory-speed work, and that assumption wants measuring on a device.
+
+A sink that fails mid-recording is reported at `stop`, not at the moment it happens — so a
+disk that fills at second three of a five-minute recording is discovered at the end. Stopping
+a recording early on the host's behalf needs a way to tell the user *why* the camera stopped,
+and that is a screen change rather than a writer change.
+
 ## 1.3.0 - 2026-08-20
 
 ### Added

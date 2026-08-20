@@ -54,6 +54,9 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     private let assetWriter = AssetWriterRecorder()
     /// Held for the duration of a recording, so the frame tap keeps delivering.
     private var recordingSubscription: FrameSubscription?
+    /// Only for a streamed recording: carries segments to the host's sink in order, and
+    /// reports at stop whether any of them failed to land.
+    private var streamPump: CaptureStreamPump?
     /// Whether the microphone output is really on the session. False on a simulator, where
     /// there is no session at all — and the writer needs to know before it creates a track it
     /// would never fill.
@@ -433,9 +436,9 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         #endif
     }
 
-    func startRecording(to outputURL: URL) {
-        switch recordingEngine {
-        case .movieFile:
+    func startRecording(to destination: RecordingDestination) {
+        switch (recordingEngine, destination) {
+        case (.movieFile, .file(let outputURL)):
             // Needs a real session, so a simulator can only no-op and hand back a stub on
             // stop — which is what it did before any of this.
             #if targetEnvironment(simulator)
@@ -444,7 +447,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             movie.start(to: outputURL, on: sessionQueue)
             #endif
 
-        case .assetWriter:
+        case (.assetWriter, .file(let outputURL)), (.streamingAssetWriter, .file(let outputURL)):
             // No `#if` here, deliberately. This path takes its video from `FrameSource`, and
             // that is simulated on a simulator — so unlike every previous recorder, this one
             // produces a real, playable file on a machine with no camera. Audio is the only
@@ -453,41 +456,80 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             // The rotation is baked in as a track transform rather than by rotating pixels:
             // one matrix in the container header instead of a full-frame copy 30 times a
             // second, and every player honours it.
-            let transform = Self.transform(forCaptureAngle: latestCaptureAngle)
             assetWriter.start(
                 to: outputURL,
-                transform: transform,
+                transform: Self.transform(forCaptureAngle: latestCaptureAngle),
                 includesAudio: isAudioTapAttached
             )
+            attachRecordingTaps()
 
-            audioTap.setConsumer { [weak self] sampleBuffer in
-                self?.assetWriter.appendAudio(sampleBuffer)
-            }
-            // Subscribing is also what attaches the video data output, so a recording holds
-            // the frame stream open for exactly as long as it runs.
-            recordingSubscription = frameTap.addConsumer { [weak self] frame in
-                self?.assetWriter.appendVideo(frame)
-            }
+        case (.assetWriter, .stream(let sink)), (.streamingAssetWriter, .stream(let sink)):
+            // The pump is what keeps AVFoundation's delegate queue from waiting on the
+            // host's disk. It is held here for the duration of the recording because `stop`
+            // has to drain it before anything can be committed.
+            let pump = CaptureStreamPump(sink: sink)
+            streamPump = pump
+            assetWriter.startStreaming(
+                transform: Self.transform(forCaptureAngle: latestCaptureAngle),
+                includesAudio: isAudioTapAttached,
+                onSegment: { pump.enqueue($0) }
+            )
+            attachRecordingTaps()
+
+        case (.movieFile, .stream):
+            // Unreachable: only an engine that streams is ever handed a sink, and this one
+            // has no point at which the app sees a byte. Recording nothing is the honest
+            // outcome — `stop` reports it, and the screen says the recording failed rather
+            // than writing a plaintext file the host never asked for.
+            break
         }
     }
 
-    func stopRecording() async throws -> URL? {
+    /// The video and audio taps a writer needs, attached together because they are two halves
+    /// of one recording.
+    private func attachRecordingTaps() {
+        audioTap.setConsumer { [weak self] sampleBuffer in
+            self?.assetWriter.appendAudio(sampleBuffer)
+        }
+        // Subscribing is also what attaches the video data output, so a recording holds
+        // the frame stream open for exactly as long as it runs.
+        recordingSubscription = frameTap.addConsumer { [weak self] frame in
+            self?.assetWriter.appendVideo(frame)
+        }
+    }
+
+    func stopRecording() async throws -> RecordingOutput? {
         switch recordingEngine {
         case .movieFile:
             #if targetEnvironment(simulator)
-            return SimulatedCapture.video()
+            return SimulatedCapture.video().map { RecordingOutput.file($0) }
             #else
-            return try await movie.stop(on: sessionQueue)
+            return try await movie.stop(on: sessionQueue).map { RecordingOutput.file($0) }
             #endif
 
-        case .assetWriter:
+        case .assetWriter, .streamingAssetWriter:
             // Unsubscribed *before* finishing, so no sample can arrive after
             // `markAsFinished` — appending to a finished input is a hard failure that
             // invalidates the whole file.
             recordingSubscription?.cancel()
             recordingSubscription = nil
             audioTap.setConsumer(nil)
-            return await assetWriter.stop()
+
+            let output = await assetWriter.stop()
+
+            // Drained after the writer has finished, because the last segment is delivered
+            // during `finishWriting` — returning before that arrives would commit a
+            // recording missing its own ending.
+            let pump = streamPump
+            streamPump = nil
+            if let failure = await pump?.finish() {
+                // Thrown rather than swallowed: the host has a half-written destination it
+                // needs to discard, and the user has to be told the recording is gone. A
+                // partial recording reported as success is the worst of the three.
+                throw failure
+            }
+
+            return output
         }
     }
 
