@@ -6,6 +6,48 @@ All notable changes to KVCameraKit are documented in this file.
 
 Nothing yet.
 
+## 1.1.0 - 2026-08-20
+
+### Added
+
+- **Scanner mode.** A third `CameraMode` beside photo and video, with a live outline that
+  tracks the page and a shutter that captures, flattens and stores it. Artifacts come back
+  as `.document` so the host can file a receipt somewhere other than the camera roll.
+
+  Detection runs on the `FrameSource` added in 1.0.0 — its first real consumer, which is
+  what that port existed for. `VNDetectDocumentSegmentationRequest` rather than
+  `VNDetectRectanglesRequest`, because a table edge, a laptop and a window frame are all
+  excellent rectangles. Not `VNDocumentCameraViewController` either: that is Apple's entire
+  scanner in a modal view controller, which cannot be themed and cannot share this screen's
+  zoom, torch and Camera Control.
+
+  Two decisions worth knowing. **The capture re-detects on the full-resolution still**
+  rather than reusing the quad from the live overlay — the preview stream and the photo
+  output can differ in aspect ratio and field of view, so a normalised quad from one does
+  not describe the same region of the other, and the result would be a scan cropped a few
+  percent off every single time. And **the tone pass is deliberately mild**: thresholding
+  hard to black-and-white looks superb on clean printed text and irreversibly destroys a
+  pencil note or a receipt shot in warm light, which for a vault means destroying the only
+  copy.
+
+  A failed detection surfaces an alert instead of silently saving the uncorrected frame. A
+  scanner that quietly hands back a skewed photo of a desk teaches the user the mode is
+  unreliable without ever saying what went wrong.
+
+### Fixed
+
+- The mode switcher no longer runs off the edge of a small screen. The pill is
+  `.fixedSize()`, and `DIGITALIZAR` and `SCANSIONE` are twice the width of `PHOTO`.
+
+### Notes
+
+`VNDetectDocumentSegmentationRequest` returns confident nonsense on synthetic images —
+measured: a flat colour yields the whole frame at confidence 0.0, flat white or black
+yields a meaningless band at 0.83–0.97, and a white rectangle drawn on a dark ground yields
+that same band at 0.99, nowhere near the rectangle. It is trained on photographs. So the
+geometry guards (`DocumentQuad.isUsable()`) are unit-tested and the detector itself is not:
+verifying it needs a device pointed at real paper.
+
 ## 1.0.0 - 2026-08-20
 
 First release. Extracted from an encrypted-vault app, where the camera had grown to

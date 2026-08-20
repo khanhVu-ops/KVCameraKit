@@ -14,3 +14,6 @@
 "Video could not be saved" = "La vidéo n’a pas pu être enregistrée";
 "Close" = "Fermer";
 "Error" = "Erreur";
+"SCAN" = "SCANNER";
+"Position the document in frame" = "Placez le document dans le cadre";
+"Could not read the document" = "Impossible de lire le document";

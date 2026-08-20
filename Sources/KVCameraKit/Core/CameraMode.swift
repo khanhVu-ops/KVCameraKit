@@ -13,12 +13,14 @@ import Foundation
 public enum CameraMode: String, CaseIterable, Equatable, Sendable {
     case video
     case photo
+    case scan
 
     /// The switcher's label. A key in the package's own table — see `CameraAlert`.
     var title: LocalizedStringResource {
         switch self {
         case .video: return .cameraKit("VIDEO")
         case .photo: return .cameraKit("PHOTO")
+        case .scan: return .cameraKit("SCAN")
         }
     }
 
@@ -31,7 +33,20 @@ public enum CameraMode: String, CaseIterable, Equatable, Sendable {
     var needsAudio: Bool {
         switch self {
         case .video: return true
-        case .photo: return false
+        case .photo, .scan: return false
+        }
+    }
+
+    /// Whether this mode needs the frame stream running.
+    ///
+    /// Only the scanner does, and it must be asked as a question about the mode rather than
+    /// checked as `mode == .scan` at the call site — the `FrameSource` attaches an
+    /// `AVCaptureVideoDataOutput` to the session, and a mode that forgot to say it needed
+    /// frames would silently get an overlay that never moves.
+    var needsFrames: Bool {
+        switch self {
+        case .scan: return true
+        case .photo, .video: return false
         }
     }
 
@@ -54,7 +69,7 @@ public enum CameraMode: String, CaseIterable, Equatable, Sendable {
     var isContinuousCapture: Bool {
         switch self {
         case .video: return true
-        case .photo: return false
+        case .photo, .scan: return false
         }
     }
 }

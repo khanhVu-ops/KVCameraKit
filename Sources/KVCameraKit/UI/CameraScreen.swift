@@ -217,7 +217,21 @@ struct CameraContentView: View {
                     .allowsHitTesting(false)
                     .animation(curtainAnimation, value: state.captureStage)
 
-                // 3. Ambient Readability Gradients (Scrims)
+                // 3. The scanner's page outline.
+                //
+                // Its own layer in the ZStack, deliberately — not a row inside the controls
+                // stack below. Put there it took a slice of the layout and shoved the mode
+                // strip and the zoom pill down the screen, and worse, its `GeometryReader`
+                // then measured *that slice* rather than the viewfinder, so a quad Vision
+                // reported at the bottom of the frame was drawn across the middle of the
+                // screen. An overlay has to share the coordinate space of the thing it
+                // annotates.
+                if state.mode.needsFrames {
+                    DocumentScanOverlay(frames: cameraService.frames)
+                        .ignoresSafeArea()
+                }
+
+                // 4. Ambient Readability Gradients (Scrims)
                 //
                 // `ignoresSafeArea` goes on the stack, not on each gradient. Applied to a
                 // gradient inside a laid-out `VStack` it extended the drawing but left the
@@ -244,7 +258,7 @@ struct CameraContentView: View {
                 .ignoresSafeArea()
                 .allowsHitTesting(false)
 
-                // 4. User Controls Layer (Top Bar, Bottom Controls)
+                // 5. User Controls Layer (Top Bar, Bottom Controls)
                 VStack(spacing: 0) {
                     topBar
                         .padding(.horizontal, theme.spacingM)
@@ -279,12 +293,12 @@ struct CameraContentView: View {
                 .animation(.spring(response: 0.34, dampingFraction: 0.76), value: state.isTimerMenuOpen)
                 .animation(.spring(response: 0.34, dampingFraction: 0.8), value: state.isFocusLocked)
 
-                // 5. Giant Numeric Countdown Timer with Numeric Transition
+                // 6. Giant Numeric Countdown Timer with Numeric Transition
                 if state.timerCountdown > 0 {
                     countdownDisplay
                 }
             }
-            // 6. The captured frame, flying to the thumbnail that published its bounds.
+            // 7. The captured frame, flying to the thumbnail that published its bounds.
             .overlayPreferenceValue(CaptureTargetAnchorKey.self) { anchor in
                 GeometryReader { proxy in
                     if case .flying(let flight) = state.captureStage, let anchor = anchor {
@@ -765,6 +779,12 @@ struct CameraContentView: View {
         } label: {
             Text(title)
                 .font(.system(size: 13, weight: isActive ? .bold : .semibold, design: .rounded))
+                // `DIGITALIZAR` and `SCANSIONE` are twice the width of `PHOTO`, and the pill
+                // is `.fixedSize()` — so without this a three-mode switcher runs off the edge
+                // of a small screen in Portuguese and Italian. Shrinking beats truncating for
+                // a word the user is choosing between.
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
                 .foregroundStyle(isActive ? Color.yellow : Color.white.opacity(0.8))
                 .shadow(color: isActive ? Color.yellow.opacity(0.5) : Color.clear, radius: 4, x: 0, y: 0)
                 .padding(.horizontal, 16)

@@ -14,3 +14,6 @@
 "Video could not be saved" = "वीडियो सहेजा नहीं जा सका";
 "Close" = "बंद करें";
 "Error" = "त्रुटि";
+"SCAN" = "स्कैन";
+"Position the document in frame" = "दस्तावेज़ को फ़्रेम में रखें";
+"Could not read the document" = "दस्तावेज़ पढ़ा नहीं जा सका";

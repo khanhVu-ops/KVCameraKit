@@ -9,6 +9,14 @@ public struct CaptureArtifact: Sendable {
     public enum Kind: Sendable {
         case photo
         case video
+        /// A scanned page: perspective-corrected and tone-adjusted, but still an image.
+        ///
+        /// A separate kind rather than `.photo` because the host files it differently — a
+        /// receipt belongs with documents, not in the camera roll — and because the
+        /// distinction is the package's to report: only the scanner knows a crop was
+        /// applied. What the host does with that is the host's business, which is the
+        /// whole shape of this boundary.
+        case document
     }
 
     public let kind: Kind

@@ -144,6 +144,11 @@ final class CameraViewModel {
     /// ViewModels.
     @ObservationIgnored private let onDismiss: () -> Void
 
+    /// For the captured still, not the live overlay — the overlay owns its own, because
+    /// pushing a quad through `state` at detection rate would invalidate every view reading
+    /// it. See `DocumentScanOverlay`.
+    @ObservationIgnored private let documentDetector = DocumentDetector()
+
     @ObservationIgnored private var recordingTask: Task<Void, Never>?
     @ObservationIgnored private var countdownTask: Task<Void, Never>?
 
@@ -360,6 +365,10 @@ final class CameraViewModel {
             } else {
                 startVideoRecording()
             }
+
+        case .scan:
+            guard !state.isCaptureBusy else { return }
+            captureScan()
         }
     }
 
@@ -403,32 +412,15 @@ final class CameraViewModel {
                     return
                 }
 
-                // Fly now, seal after. `preview` is a ~1 MP frame from the same
-                // capture, so the card is sharp without waiting for encryption.
-                let flightImage = shot.preview ?? shot.data
-                state.captureStage = .flying(CaptureFlight(id: UUID(), imageData: flightImage))
-
                 let artifact = CaptureArtifact(
                     kind: .photo,
                     data: shot.data,
                     fileExtension: shot.fileExtension,
                     previewData: shot.preview
                 )
-
-                // Cheap half first, expensive half second. The display thumbnail is tens
-                // of milliseconds and the encrypted write is hundreds, so asking in that
-                // order means the image is already under the card by the time it lands
-                // and the cross-fade has something to fade onto.
-                if let thumbnail = await handler.displayThumbnail(for: [artifact]) {
-                    state.latestCapturedThumbnailData = thumbnail
-                }
-
-                let receipt = try await handler.store([artifact])
-                if let thumbnail = receipt.thumbnailData {
-                    state.latestCapturedThumbnailData = thumbnail
-                }
-                state.isSealing = false
-                CameraHaptic.success.play()
+                // `preview` is a ~1 MP frame from the same capture, so the card is sharp
+                // without waiting for encryption.
+                try await seal(artifact, flying: shot.preview ?? shot.data)
             } catch {
                 // A capture already in the air is left to land; only the seal failed.
                 if state.captureStage == .exposing {
@@ -439,6 +431,89 @@ final class CameraViewModel {
                 CameraHaptic.error.play()
             }
         }
+    }
+
+    /// Capture, flatten, store.
+    ///
+    /// The curtain and the haptic are the same as a photo, because to the user this is still
+    /// one shutter press. What differs is that the bytes are transformed before anyone sees
+    /// them, so the card that flies is the *finished page* rather than the frame — landing a
+    /// skewed photo of a desk and replacing it a moment later would read as a glitch.
+    private func captureScan() {
+        state.captureStage = .exposing
+        state.isSealing = true
+        CameraHaptic.rigid.play()
+
+        Task {
+            do {
+                guard let shot = try await cameraService.capturePhoto() else {
+                    state.captureStage = .idle
+                    state.isSealing = false
+                    return
+                }
+
+                // Off the main actor: detection plus a perspective warp on a 12 MP frame is
+                // tens of milliseconds at best, and it is happening while the curtain is
+                // down.
+                let detector = documentDetector
+                let page = await Task.detached(priority: .userInitiated) {
+                    DocumentPageRenderer.scan(data: shot.data, detector: detector)
+                }.value
+
+                guard let page else {
+                    // Deliberately not falling back to the uncorrected frame. A scanner that
+                    // quietly saves a skewed photo of a desk teaches the user the mode is
+                    // unreliable without ever saying what went wrong.
+                    state.captureStage = .idle
+                    state.isSealing = false
+                    state.alert = CameraAlert(
+                        title: .cameraKit("Error"),
+                        message: .cameraKit("Could not read the document")
+                    )
+                    CameraHaptic.error.play()
+                    return
+                }
+
+                let artifact = CaptureArtifact(
+                    kind: .document,
+                    data: page,
+                    fileExtension: "jpg",
+                    previewData: page
+                )
+                try await seal(artifact, flying: page)
+            } catch {
+                if state.captureStage == .exposing {
+                    state.captureStage = .idle
+                }
+                state.isSealing = false
+                state.alert = CameraAlert(
+                    title: .cameraKit("Error"),
+                    message: .cameraKit("Could not read the document")
+                )
+                CameraHaptic.error.play()
+            }
+        }
+    }
+
+    /// The tail every still capture shares.
+    ///
+    /// Extracted because the *order* is the subtle part, not the steps: the display
+    /// thumbnail is tens of milliseconds and the encrypted write is hundreds, so asking in
+    /// that order means the image is already under the card by the time the flight lands and
+    /// the cross-fade has something to fade onto. Written out twice, one copy loses it.
+    private func seal(_ artifact: CaptureArtifact, flying flightImage: Data) async throws {
+        state.captureStage = .flying(CaptureFlight(id: UUID(), imageData: flightImage))
+
+        if let thumbnail = await handler.displayThumbnail(for: [artifact]) {
+            state.latestCapturedThumbnailData = thumbnail
+        }
+
+        let receipt = try await handler.store([artifact])
+        if let thumbnail = receipt.thumbnailData {
+            state.latestCapturedThumbnailData = thumbnail
+        }
+        state.isSealing = false
+        CameraHaptic.success.play()
     }
 
     private func startVideoRecording() {

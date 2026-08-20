@@ -14,3 +14,6 @@
 "Video could not be saved" = "Không thể lưu video";
 "Close" = "Đóng";
 "Error" = "Lỗi";
+"SCAN" = "QUÉT";
+"Position the document in frame" = "Đặt tài liệu vào trong khung";
+"Could not read the document" = "Không đọc được tài liệu";

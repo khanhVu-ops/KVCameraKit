@@ -14,3 +14,6 @@
 "Video could not be saved" = "비디오를 저장할 수 없습니다";
 "Close" = "닫기";
 "Error" = "오류";
+"SCAN" = "스캔";
+"Position the document in frame" = "문서를 화면에 맞추세요";
+"Could not read the document" = "문서를 인식할 수 없습니다";

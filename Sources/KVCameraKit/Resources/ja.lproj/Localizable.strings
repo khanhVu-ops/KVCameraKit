@@ -14,3 +14,6 @@
 "Video could not be saved" = "ビデオを保存できませんでした";
 "Close" = "閉じる";
 "Error" = "エラー";
+"SCAN" = "スキャン";
+"Position the document in frame" = "書類をフレーム内に収めてください";
+"Could not read the document" = "書類を読み取れませんでした";

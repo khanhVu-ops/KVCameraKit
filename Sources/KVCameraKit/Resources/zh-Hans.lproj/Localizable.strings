@@ -14,3 +14,6 @@
 "Video could not be saved" = "无法保存视频";
 "Close" = "关闭";
 "Error" = "错误";
+"SCAN" = "扫描";
+"Position the document in frame" = "将文档放入取景框";
+"Could not read the document" = "无法识别文档";
