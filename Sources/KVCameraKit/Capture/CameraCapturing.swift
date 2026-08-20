@@ -85,7 +85,7 @@ enum CameraHardwareControlChange: Sendable {
 /// `LanguageStore.localized` — the app's existing bridge — and not `String(localized:)`,
 /// which reads the *device* language and would disagree with the language chosen in the
 /// app.
-struct CameraControlLabels: Sendable {
+struct CameraControlLabels: Equatable, Sendable {
     let zoom: String
     /// The lens factors as text — `0,5` · `1` · `2` · `3` · `5`. Built with an explicit
     /// locale rather than `.formatted()`, which reads the device locale and would print a
@@ -199,6 +199,11 @@ protocol CameraCapturing: AnyObject, Sendable {
     /// hardware has no such button.
     func installHardwareControls(labels: CameraControlLabels) async
 
+    /// Stores the localized titles so that the next session configuration (initial setup or
+    /// camera switch) can install controls atomically inside beginConfiguration() without
+    /// triggering a second pipeline rebuild on a running session.
+    func setHardwareControlLabels(_ labels: CameraControlLabels)
+
     /// Where the zoom actually is. `nil` on a machine with no camera.
     ///
     /// A diagnostic, and it earns its place in the protocol the same way the frame counter
@@ -213,4 +218,8 @@ protocol CameraCapturing: AnyObject, Sendable {
     /// before, and nothing reads this until a scanner, a Metal preview, a recorder or a
     /// filter does. Nothing is attached to the session until the first consumer subscribes.
     var frames: any FrameSource { get }
+}
+
+extension CameraCapturing {
+    func setHardwareControlLabels(_ labels: CameraControlLabels) {}
 }

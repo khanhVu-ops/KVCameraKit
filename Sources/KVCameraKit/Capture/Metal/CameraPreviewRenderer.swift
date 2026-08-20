@@ -62,6 +62,7 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         let format: FrameFormat
         let rotationAngle: CGFloat
         let sourceSize: CGSize
+        let isMirrored: Bool
     }
 
     private enum FrameFormat {
@@ -137,15 +138,16 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
+        let mirrored = isMirrored
 
         let prepared: PendingFrame?
         switch format {
         case kCVPixelFormatType_32BGRA:
-            prepared = makeBGRAFrame(from: pixelBuffer, frame: frame, size: CGSize(width: width, height: height))
+            prepared = makeBGRAFrame(from: pixelBuffer, frame: frame, size: CGSize(width: width, height: height), isMirrored: mirrored)
         case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:
-            prepared = makeYCbCrFrame(from: pixelBuffer, frame: frame, size: CGSize(width: width, height: height), isFullRange: true)
+            prepared = makeYCbCrFrame(from: pixelBuffer, frame: frame, size: CGSize(width: width, height: height), isFullRange: true, isMirrored: mirrored)
         case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange:
-            prepared = makeYCbCrFrame(from: pixelBuffer, frame: frame, size: CGSize(width: width, height: height), isFullRange: false)
+            prepared = makeYCbCrFrame(from: pixelBuffer, frame: frame, size: CGSize(width: width, height: height), isFullRange: false, isMirrored: mirrored)
         default:
             // An unhandled format draws nothing rather than drawing garbage. Silently
             // rendering a misinterpreted buffer is how a green-and-magenta viewfinder ships.
@@ -158,14 +160,15 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func makeBGRAFrame(from pixelBuffer: CVPixelBuffer, frame: CameraFrame, size: CGSize) -> PendingFrame? {
+    private func makeBGRAFrame(from pixelBuffer: CVPixelBuffer, frame: CameraFrame, size: CGSize, isMirrored: Bool) -> PendingFrame? {
         guard let (holder, texture) = makeTexture(from: pixelBuffer, plane: 0, format: .bgra8Unorm) else { return nil }
         return PendingFrame(
             holders: [holder],
             textures: [texture],
             format: .bgra,
             rotationAngle: frame.rotationAngle ?? 0,
-            sourceSize: size
+            sourceSize: size,
+            isMirrored: isMirrored
         )
     }
 
@@ -173,7 +176,8 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         from pixelBuffer: CVPixelBuffer,
         frame: CameraFrame,
         size: CGSize,
-        isFullRange: Bool
+        isFullRange: Bool,
+        isMirrored: Bool
     ) -> PendingFrame? {
         // Luma is single-channel at full resolution; chroma is two interleaved channels at
         // half resolution. `r8Unorm` and `rg8Unorm` are what those planes actually are —
@@ -187,7 +191,8 @@ final class CameraPreviewRenderer: @unchecked Sendable {
             textures: [luma, chroma],
             format: .ycbcr(isFullRange: isFullRange),
             rotationAngle: frame.rotationAngle ?? 0,
-            sourceSize: size
+            sourceSize: size,
+            isMirrored: isMirrored
         )
     }
 
@@ -228,7 +233,7 @@ final class CameraPreviewRenderer: @unchecked Sendable {
             source: frame.sourceSize,
             destination: view.drawableSize,
             rotationAngle: previewRotationAngle,
-            mirrored: isMirrored
+            mirrored: frame.isMirrored
         )
 
         var tone = toneMatrix

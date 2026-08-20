@@ -124,7 +124,7 @@ final class CameraToneTests: XCTestCase {
 
     // MARK: - Parity with the still path
 
-    /// Core Image, through the real `StillToneRenderer`, has to produce what the matrix says.
+    /// Core Image, through the real `ToneRenderer`, has to produce what the matrix says.
     ///
     /// This is the whole reason the tone is a matrix. It goes through the production call —
     /// including its unmanaged colour space, which is the detail that makes the numbers
@@ -142,7 +142,7 @@ final class CameraToneTests: XCTestCase {
             CameraFilter.vivid.tone,
             CameraFilter.cool.tone
         ] {
-            let filtered = try XCTUnwrap(StillToneRenderer.apply(tone, to: jpeg), "the still path produced nothing")
+            let filtered = try XCTUnwrap(ToneRenderer.apply(tone, to: jpeg), "the still path produced nothing")
             XCTAssertEqual(filtered.fileExtension, "jpg", "a filtered photo is a re-encode and must say so")
 
             let actual = try Self.centrePixel(of: filtered.data)
@@ -163,19 +163,19 @@ final class CameraToneTests: XCTestCase {
     /// identity matrix would degrade every unfiltered photo the app takes.
     func test_aNeutralToneReturnsTheOriginalBytesUntouched() throws {
         let jpeg = try Self.solidJPEG(rgb: SIMD3<Float>(0.4, 0.55, 0.7))
-        let result = try XCTUnwrap(StillToneRenderer.apply(.neutral, to: jpeg))
+        let result = try XCTUnwrap(ToneRenderer.apply(.neutral, to: jpeg))
         XCTAssertEqual(result.data, jpeg, "an unfiltered photo was re-encoded")
     }
 
     func test_bytesThatAreNotAnImageAreRefusedRatherThanPassedThrough() {
-        XCTAssertNil(StillToneRenderer.apply(CameraFilter.vivid.tone, to: Data("not an image".utf8)))
+        XCTAssertNil(ToneRenderer.apply(CameraFilter.vivid.tone, to: Data("not an image".utf8)))
     }
 
     /// `CIColorMatrix` reads the transform out by rows, with the offset in its own vector —
     /// leaving the offset in the colour vectors would multiply it by the pixel's alpha.
     func test_theCoreImageParametersAreTheMatrixByRows() throws {
         let matrix = CameraTone(contrast: 1.5, saturation: 0.5).colorMatrix
-        let parameters = StillToneRenderer.parameters(for: matrix)
+        let parameters = ToneRenderer.parameters(for: matrix)
 
         let red = try XCTUnwrap(parameters["inputRVector"] as? CIVector)
         XCTAssertEqual(Float(red.x), matrix[0][0], accuracy: 0.0001)

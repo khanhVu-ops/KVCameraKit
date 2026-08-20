@@ -456,6 +456,54 @@ final class CameraViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.state.currentZoom, 4.0)
     }
 
+    // MARK: - Switching camera
+
+    /// A swap leaves nothing of the old camera on screen.
+    ///
+    /// Each of these was a control describing a camera that is no longer there: a torch button
+    /// lit with nothing lit, a pill saying 3× over a lens sitting at 1×, an exposure badge for
+    /// a bias the new device never received.
+    func test_switchingCameraDropsEverythingTheOldOneWasHolding() async throws {
+        let camera = StubCamera()
+        camera.range = 0.5...8.0
+        let viewModel = makeViewModel(camera: camera)
+
+        viewModel.send(.onAppear)
+        try await waitUntil { viewModel.state.authorization == .authorized }
+
+        viewModel.send(.setZoom(3.0, animated: true))
+        viewModel.send(.toggleTorch)
+        viewModel.send(.setExposureBias(1.5))
+        viewModel.send(.focusAt(devicePoint: .zero, viewPoint: CGPoint(x: 10, y: 10), locked: true))
+        XCTAssertEqual(viewModel.state.currentZoom, 3.0)
+        XCTAssertTrue(viewModel.state.isTorchOn)
+        XCTAssertTrue(viewModel.state.isFocusLocked)
+
+        viewModel.send(.switchCamera)
+        try await waitUntil { !viewModel.state.isSwitchingCamera }
+
+        XCTAssertEqual(viewModel.state.currentZoom, 1.0, "the pill still describes the previous lens")
+        XCTAssertFalse(viewModel.state.isTorchOn, "a front camera has no torch to be on")
+        XCTAssertEqual(viewModel.state.exposureBias, 0)
+        XCTAssertFalse(viewModel.state.isFocusLocked)
+        XCTAssertNil(viewModel.state.focusTapPoint)
+        XCTAssertTrue(viewModel.state.isUsingFrontCamera)
+    }
+
+    /// The startup case must keep behaving the other way: a zoom chosen while the session was
+    /// still coming up survives, because nothing reset the lens.
+    func test_theStartupRefreshStillKeepsTheChosenZoom() async throws {
+        let camera = StubCamera()
+        camera.setupDelayNanoseconds = 200_000_000
+        let viewModel = makeViewModel(camera: camera)
+
+        viewModel.send(.onAppear)
+        viewModel.send(.setZoom(2.0, animated: true))
+        try await waitUntil { viewModel.state.authorization == .authorized }
+
+        XCTAssertEqual(viewModel.state.currentZoom, 2.0)
+    }
+
     // MARK: - Filters
 
     func test_pickingAFilterAppliesItAndClosesTheStrip() {

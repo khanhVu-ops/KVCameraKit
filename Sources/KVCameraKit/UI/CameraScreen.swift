@@ -77,12 +77,6 @@ public struct CameraScreen: View {
         .onAppear {
             viewModel.send(.installHardwareControls(hardwareControlLabels))
         }
-        // The lens list arrives once the session is up, and the HUD picker is built from
-        // it, so the controls are rebuilt when it lands. Installing is idempotent — it
-        // clears the session's controls first.
-        .onChange(of: viewModel.state.zoomLevels) { _ in
-            viewModel.send(.installHardwareControls(hardwareControlLabels))
-        }
     }
 }
 
@@ -176,6 +170,7 @@ struct CameraContentView: View {
                                 session: cameraService.session,
                                 onLayerReady: { cameraService.attachPreviewLayer($0) },
                                 onTapToFocus: { devicePoint, viewPoint, locked in
+                                    guard !state.isSwitchingCamera else { return }
                                     localFocusPoint = viewPoint
                                     onTapToFocus(devicePoint, viewPoint, locked)
                                 }
@@ -189,6 +184,7 @@ struct CameraContentView: View {
                                 isMirrored: state.isUsingFrontCamera,
                                 tone: state.filter.tone,
                                 onTapToFocus: { devicePoint, viewPoint, locked in
+                                    guard !state.isSwitchingCamera else { return }
                                     localFocusPoint = viewPoint
                                     onTapToFocus(devicePoint, viewPoint, locked)
                                 }
@@ -356,14 +352,33 @@ struct CameraContentView: View {
                 .allowsHitTesting(false)
             }
             .simultaneousGesture(
-                // Swipe the strip, carousel style: dragging right brings the mode on the
-                // left (VIDEO) into the middle.
+                // **One** drag for the whole viewfinder, and `CameraViewfinderSwipe` decides
+                // what it meant. Two gestures with different rules would both be recognised on
+                // a diagonal drag, and the user would get a mode change *and* a shelf they did
+                // not ask for — there is no ordering that makes two overlapping drags safe.
                 DragGesture(minimumDistance: 30)
                     .onEnded { value in
-                        guard abs(value.translation.width) > 60,
-                              abs(value.translation.width) > abs(value.translation.height) * 1.5 else { return }
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
-                            onSetMode(state.mode.stepped(by: value.translation.width < 0 ? 1 : -1))
+                        // Ignore drags that started on the top bar or bottom controls (zoom picker,
+                        // filter strip, mode switcher, shutter row).
+                        let isInsideViewfinder = value.startLocation.y > 90
+                            && value.startLocation.y < fullScreenGeo.size.height - 230
+                        guard isInsideViewfinder, !state.isRecording else { return }
+
+                        switch CameraViewfinderSwipe.classify(value.translation, canFilter: canFilter) {
+                        case .mode(let step):
+                            guard !state.isFilterPickerOpen else { return }
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.72)) {
+                                onSetMode(state.mode.stepped(by: step))
+                            }
+
+                        case .filters(let open):
+                            guard open != state.isFilterPickerOpen else { return }
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                onToggleFilterPicker()
+                            }
+
+                        case .none:
+                            break
                         }
                     }
             )
@@ -383,7 +398,7 @@ struct CameraContentView: View {
         }
         .onChange(of: state.authorization) { authorization in
             guard authorization == .authorized else { return }
-            withAnimation(reduceMotion ? .easeOut(duration: 0.2) : .easeOut(duration: 0.42)) {
+            withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .easeOut(duration: 0.22)) {
                 viewfinderReveal = 1
             }
         }
@@ -559,21 +574,34 @@ struct CameraContentView: View {
         state.mode.supportsFilters && previewEngine.needsFrames
     }
 
+    private var isFiltering: Bool {
+        state.filter.id != CameraFilter.original.id
+    }
+
     @ViewBuilder
     private var filterButton: some View {
         if canFilter {
             Button {
-                onToggleFilterPicker()
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    onToggleFilterPicker()
+                }
             } label: {
-                Image(systemName: state.filter.id == CameraFilter.original.id
-                      ? "camera.filters"
-                      : "camera.filters")
+                Image(systemName: "camera.filters")
                     .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(state.filter.id == CameraFilter.original.id
-                                     ? Color.white.opacity(0.8)
-                                     : Color.yellow)
+                    // Yellow for "a look is on", which is the only state worth colouring: it
+                    // is the answer to "why does this photo look like that".
+                    .foregroundStyle(isFiltering ? Color.yellow : Color.white.opacity(0.8))
                     .frame(width: Self.topBarButtonSide, height: Self.topBarButtonSide)
                     .background(glassCircleBackground)
+                    .overlay(alignment: .bottom) {
+                        // A dot under the button while the shelf is open, so the button and the
+                        // shelf agree about each other.
+                        Circle()
+                            .fill(Color.yellow)
+                            .frame(width: 4, height: 4)
+                            .offset(y: 3)
+                            .opacity(state.isFilterPickerOpen ? 1 : 0)
+                    }
             }
             .transition(.scale.combined(with: .opacity))
         }
@@ -722,39 +750,40 @@ struct CameraContentView: View {
 
     private var bottomControls: some View {
         VStack(spacing: theme.spacingS) {
-            // 0. The filter strip, when it is open.
             if canFilter && state.isFilterPickerOpen {
-                CameraFilterPicker(
+                CameraFilterStrip(
                     filters: CameraFilter.all,
                     selectedID: state.filter.id,
-                    onSelect: onSelectFilter
+                    frames: cameraService.frames,
+                    onSelect: onSelectFilter,
+                    onDismiss: onToggleFilterPicker
                 )
                 .transition(.move(edge: .bottom).combined(with: .opacity))
-            }
-
-            // 1. Zoom Picker Pill
-            CameraZoomPicker(
-                levels: state.zoomLevels,
-                currentZoom: state.currentZoom,
-                onSelectZoom: { factor in
-                    currentPinchZoom = factor
-                    onSelectZoom(factor, true)
-                },
-                onZoomTo: { factor, animated in
-                    currentPinchZoom = factor
-                    onSelectZoom(factor, animated)
-                }
-            )
-            .padding(.bottom, 2)
-
-            // 2. Mode Switcher (PHOTO / VIDEO) or Recording Stopwatch — animated together with
-            //    the strip above, so opening it slides the controls rather than snapping them.
-            if state.mode.isContinuousCapture && state.isRecording {
-                recordingStopwatch
-                    .padding(.vertical, 4)
+                .padding(.bottom, 2)
             } else {
-                systemModeSwitcher
-                    .padding(.vertical, 4)
+                CameraZoomPicker(
+                    levels: state.zoomLevels,
+                    currentZoom: state.currentZoom,
+                    onSelectZoom: { factor in
+                        currentPinchZoom = factor
+                        onSelectZoom(factor, true)
+                    },
+                    onZoomTo: { factor, animated in
+                        currentPinchZoom = factor
+                        onSelectZoom(factor, animated)
+                    }
+                )
+                .padding(.bottom, 2)
+                .transition(.opacity)
+
+                // 2. Mode Switcher (PHOTO / VIDEO) or Recording Stopwatch
+                if state.mode.isContinuousCapture && state.isRecording {
+                    recordingStopwatch
+                        .padding(.vertical, 4)
+                } else {
+                    systemModeSwitcher
+                        .padding(.vertical, 4)
+                }
             }
 
             // 3. Shutter Row: Thumbnail (left), Shutter Button (center), Flip Camera (right)
@@ -780,6 +809,9 @@ struct CameraContentView: View {
                     isExposing: state.captureStage == .exposing,
                     action: onShutterTap
                 )
+                .disabled(state.isSwitchingCamera)
+                .opacity(state.isSwitchingCamera ? 0.6 : 1.0)
+                .animation(.easeInOut(duration: 0.2), value: state.isSwitchingCamera)
 
                 Spacer()
 

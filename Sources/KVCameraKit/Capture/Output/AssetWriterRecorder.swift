@@ -303,10 +303,15 @@ final class AssetWriterRecorder: @unchecked Sendable {
             hasStartedSession = true
             firstVideoTime = presentationTime
 
-            // The poster comes from the first frame that actually made it into the file, and
-            // from *this* side of the encoder — a streamed recording has no file left to
-            // decode one out of.
-            posterData = CapturePosterRenderer.jpeg(from: sampleBuffer, rotationAngle: rotationDegrees)
+            // The poster comes from the first frame that actually made it into the file.
+            // Rendered off writerQueue so JPEG encoding never delays the first video frame.
+            let angle = rotationDegrees
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+                let poster = CapturePosterRenderer.jpeg(from: sampleBuffer, rotationAngle: angle)
+                self?.writerQueue.async {
+                    self?.posterData = poster
+                }
+            }
         }
 
         guard writer.status == .writing, videoInput.isReadyForMoreMediaData else { return }

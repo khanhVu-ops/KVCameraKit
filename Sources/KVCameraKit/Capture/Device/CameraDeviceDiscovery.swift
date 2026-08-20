@@ -30,7 +30,29 @@ enum CameraDeviceDiscovery {
         .builtInWideAngleCamera
     ]
 
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cachedBackDevice: AVCaptureDevice?
+    nonisolated(unsafe) private static var cachedFrontDevice: AVCaptureDevice?
+
     static func device(for position: CameraPosition) -> AVCaptureDevice? {
+        lock.lock()
+        defer { lock.unlock() }
+
+        switch position {
+        case .back:
+            if let cached = cachedBackDevice { return cached }
+            let device = discoverDevice(for: .back)
+            cachedBackDevice = device
+            return device
+        case .front:
+            if let cached = cachedFrontDevice { return cached }
+            let device = discoverDevice(for: .front)
+            cachedFrontDevice = device
+            return device
+        }
+    }
+
+    private static func discoverDevice(for position: CameraPosition) -> AVCaptureDevice? {
         let discovery = AVCaptureDevice.DiscoverySession(
             deviceTypes: preferredDeviceTypes,
             mediaType: .video,

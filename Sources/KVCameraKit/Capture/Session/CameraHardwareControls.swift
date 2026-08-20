@@ -14,6 +14,8 @@ final class CameraHardwareControls: NSObject, @unchecked Sendable {
     /// it the button would keep saying `1×` after the screen had moved on.
     private var lensPicker: AVCaptureIndexPicker?
     private var lensLevels: [CGFloat] = []
+    private var installedDevice: AVCaptureDevice?
+    private var installedLabels: CameraControlLabels?
 
     /// A lens was picked on the button: the index, and the factor it maps to. Applying it is
     /// the service's job — this type does not hold the device.
@@ -45,19 +47,40 @@ final class CameraHardwareControls: NSObject, @unchecked Sendable {
     ) {
         guard session.supportsControls else { return }
 
-        session.setControlsDelegate(self, queue: queue)
+        // Short-circuit if the configuration hasn't changed. Rebuilding controls on a running
+        // session triggers an expensive capture pipeline rebuild that stalls sessionQueue.
+        if installedDevice == device && lensLevels == levels && installedLabels == labels {
+            syncSelectedLens(for: device)
+            return
+        }
+
         session.beginConfiguration()
+        installLocked(on: session, device: device, levels: levels, labels: labels, queue: queue)
+        session.commitConfiguration()
+    }
+
+    /// Session queue only. Must run inside an already open `session.beginConfiguration()` block.
+    func installLocked(
+        on session: AVCaptureSession,
+        device: AVCaptureDevice,
+        levels: [CGFloat],
+        labels: CameraControlLabels,
+        queue: DispatchQueue
+    ) {
+        guard session.supportsControls else { return }
+
+        session.setControlsDelegate(self, queue: queue)
         for control in session.controls {
             session.removeControl(control)
         }
 
         lensLevels = levels
+        installedDevice = device
+        installedLabels = labels
         lensPicker = nil
         addLensPicker(to: session, device: device, labels: labels, queue: queue)
         addExposureSlider(to: session, device: device, labels: labels, queue: queue)
         addTimerPicker(to: session, labels: labels, queue: queue)
-
-        session.commitConfiguration()
     }
 
     /// A picker over the lenses, not a continuous slider. The system's own Camera puts a

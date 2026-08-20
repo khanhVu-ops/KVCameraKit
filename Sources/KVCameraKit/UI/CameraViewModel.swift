@@ -185,13 +185,12 @@ final class CameraViewModel {
         self.recordingEngine = recordingEngine
         // The engine reaches the service at construction because it decides which outputs go
         // on the session, which cannot be changed once a recording is in flight.
-        self.cameraService = cameraService ?? CameraService(
+        let service = cameraService ?? CameraService(
             recordingEngine: recordingEngine,
-            // The engine reaches the service for the same reason the recording one does: it
-            // decides which outputs belong in the session's *first* configuration, and adding
-            // them later — to a running session — is a pipeline rebuild.
             previewEngine: previewEngine
         )
+        self.cameraService = service
+        refreshZoomCapabilities()
     }
 
     func send(_ action: Action) {
@@ -364,13 +363,25 @@ final class CameraViewModel {
             guard !state.isSwitchingCamera else { return }
             CameraHaptic.medium.play()
             state.isSwitchingCamera = true
+
+            // Everything the *old* camera was holding goes with it. The new device comes up at
+            // its own defaults — 1× zoom, no torch, no exposure compensation, metering
+            // continuously — and every one of these left behind is a control whose label
+            // describes a camera that is no longer there: a torch button lit with nothing lit,
+            // a pill saying 3× on a lens sitting at 1×, an exposure badge for a bias the new
+            // device never received. Focus was already cleared here; the rest belong with it.
             state.isFocusLocked = false
             state.focusTapPoint = nil
+            state.isTorchOn = false
+            state.exposureBias = 0
+
             Task {
                 await cameraService.switchCamera()
                 // The front camera has a different set of lenses; re-reading is the only
-                // way the pill stops advertising the back camera's.
-                refreshZoomCapabilities()
+                // way the pill stops advertising the back camera's. Reset rather than clamped:
+                // the service puts the new device at 1×, so keeping the old factor would leave
+                // the number on the pill disagreeing with the lens.
+                refreshZoomCapabilities(resettingZoom: true)
                 state.isUsingFrontCamera = cameraService.isUsingFrontCamera
                 state.isSwitchingCamera = false
             }
@@ -382,6 +393,7 @@ final class CameraViewModel {
             state.captureStage = .idle
 
         case .installHardwareControls(let labels):
+            cameraService.setHardwareControlLabels(labels)
             Task { await cameraService.installHardwareControls(labels: labels) }
 
         case .dismissAlert:
@@ -420,6 +432,7 @@ final class CameraViewModel {
     // MARK: - Capture
 
     private func handleShutterTap() {
+        guard !state.isSwitchingCamera else { return }
         switch state.mode {
         case .photo:
             guard !state.isCaptureBusy else { return }
@@ -489,8 +502,8 @@ final class CameraViewModel {
                 let tone = state.filter.tone
                 let filtered = await Task.detached(priority: .userInitiated) {
                     (
-                        full: StillToneRenderer.apply(tone, to: shot.data),
-                        preview: shot.preview.flatMap { StillToneRenderer.apply(tone, to: $0) }
+                        full: ToneRenderer.apply(tone, to: shot.data),
+                        preview: shot.preview.flatMap { ToneRenderer.apply(tone, to: $0) }
                     )
                 }.value
 
@@ -743,7 +756,13 @@ final class CameraViewModel {
         recordingTask = nil
     }
 
-    private func refreshZoomCapabilities() {
+    /// `resettingZoom` is the difference between the two callers, and it matters.
+    ///
+    /// On appearance the capabilities arrive a second *after* the screen did, so a zoom the
+    /// user chose in that second has to survive — clamped into the range that has only now
+    /// been read. On a camera switch the device has genuinely been put back to 1×, so keeping
+    /// the old number would leave the pill describing the previous lens.
+    private func refreshZoomCapabilities(resettingZoom: Bool = false) {
         let range = cameraService.zoomRange()
         state.zoomLevels = cameraService.availableZoomLevels()
         // A range of exactly 1…1 is what `CameraZoomLadder` returns when it could not make
@@ -756,7 +775,8 @@ final class CameraViewModel {
         // after the screen appeared — and it used to overwrite the factor with 1×, so a zoom
         // chosen during that second was visibly snapped back. The pill now keeps what the
         // user picked, and only the range it is clamped into is news.
-        state.currentZoom = min(max(state.currentZoom, range.lowerBound), range.upperBound)
+        let target = resettingZoom ? 1.0 : state.currentZoom
+        state.currentZoom = min(max(target, range.lowerBound), range.upperBound)
     }
 
     // MARK: - Helpers

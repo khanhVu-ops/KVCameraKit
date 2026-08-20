@@ -11,6 +11,11 @@ import Foundation
 /// needs no decode at all.
 enum CapturePosterRenderer {
 
+    nonisolated(unsafe) private static let context = CIContext(options: [
+        .workingColorSpace: NSNull(),
+        .useSoftwareRenderer: false
+    ])
+
     /// A JPEG of the frame, oriented by the recording's track transform and no larger than
     /// `maxDimension`.
     ///
@@ -48,10 +53,6 @@ enum CapturePosterRenderer {
             by: CGAffineTransform(translationX: -image.extent.origin.x, y: -image.extent.origin.y)
         )
 
-        // Built per call rather than held: this runs once at the start of a recording, and a
-        // cached `CIContext` would keep a Metal command queue alive for the lifetime of the
-        // camera in exchange for saving a few milliseconds once.
-        let context = CIContext(options: [.useSoftwareRenderer: false])
         let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         return context.jpegRepresentation(
             of: image,

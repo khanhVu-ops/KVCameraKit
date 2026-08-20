@@ -124,6 +124,16 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             }
         )
         observer.observe(session)
+
+        let defaultDevice = CameraDeviceDiscovery.device(for: .back)
+        refreshZoomCache(for: defaultDevice)
+    }
+
+    private var hardwareControlLabels: CameraControlLabels?
+    private var requestedExposureBias: Float = 0.0
+
+    func setHardwareControlLabels(_ labels: CameraControlLabels) {
+        hardwareControlLabels = labels
     }
 
     // MARK: - Session lifecycle
@@ -218,6 +228,16 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             (frameTap as? CameraFrameTap)?.pin(to: session)
         }
 
+        if let labels = hardwareControlLabels {
+            hardwareControls.installLocked(
+                on: session,
+                device: device,
+                levels: CameraZoomLadder.levels(for: device),
+                labels: labels,
+                queue: sessionQueue
+            )
+        }
+
         session.commitConfiguration()
         session.startRunning()
         isSessionStarted = session.isRunning
@@ -228,6 +248,10 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         // Whatever the screen last asked for — 1× if nobody has touched it, and the factor
         // the user picked while the session was still coming up if they did.
         applyZoom(to: device, uiFactor: requestedZoomFactor, animated: false)
+
+        if requestedExposureBias != 0 {
+            device.applyExposureBias(requestedExposureBias)
+        }
 
         return session.isRunning
     }
@@ -279,7 +303,24 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             session.addInput(currentInput)
         }
 
+        if let labels = hardwareControlLabels {
+            hardwareControls.installLocked(
+                on: session,
+                device: newDevice,
+                levels: CameraZoomLadder.levels(for: newDevice),
+                labels: labels,
+                queue: sessionQueue
+            )
+        }
+
         session.commitConfiguration()
+
+        // The torch belongs to the device that is going away. `isTorchOn` is this object's
+        // memory of a hardware state, and a front camera has no torch to be in it — left
+        // `true`, the next `setTorch(on: false)` would be a no-op against a flag that was
+        // already lying.
+        isTorchOn = false
+        requestedExposureBias = 0
 
         // Reset to 1× on a swap, deliberately: the lens layouts differ, so a 5× held on a
         // triple camera is not a thing the front camera can honour. The *request* is reset
@@ -420,7 +461,9 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
 
     func setExposureBias(_ bias: Float) {
         sessionQueue.async { [weak self] in
-            self?.activeDevice?.applyExposureBias(bias)
+            guard let self = self else { return }
+            self.requestedExposureBias = bias
+            self.activeDevice?.applyExposureBias(bias)
         }
     }
 
