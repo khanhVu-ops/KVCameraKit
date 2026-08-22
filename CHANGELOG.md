@@ -4,7 +4,14 @@ All notable changes to KVCameraKit are documented in this file.
 
 ## Unreleased
 
+## 1.5.1 - 2026-08-23
+
 ### Added
+
+- **Realtime Face FX with capture parity.** Big Eyes, Slim Face and Funhouse now share the
+  existing Vision tracker and run as a first-class pixel stage in the Metal viewfinder,
+  captured stills and `AVAssetWriter` recordings. The look shelf names every active stage and
+  lets users jump directly back to the control that produced it.
 
 - **Phase 2 look pipeline: Tone -> 3D LUT -> Beauty.** The Metal preview now uploads
   normalized 3D textures and runs tone, trilinear LUT grading, skin-isolated bilateral
