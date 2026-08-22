@@ -22,10 +22,10 @@ enum CensorGeometry {
     /// The vertical figure is larger than the horizontal one and the centre moves *up*,
     /// because the missing region is not symmetric: there is a whole skull above the eyebrows
     /// and only a chin below them.
-    static let widthScale: CGFloat = 1.36
-    static let heightScale: CGFloat = 1.62
+    static let widthScale: CGFloat = 1.52
+    static let heightScale: CGFloat = 1.78
     /// Upward shift of the centre, as a fraction of Vision's box height. Up is **minus** here.
-    static let upwardBias: CGFloat = 0.11
+    static let upwardBias: CGFloat = 0.14
 
     // MARK: - Vision's orientation
 

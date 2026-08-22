@@ -50,9 +50,15 @@
    name every stage that is currently changing the picture. */
 "Mosaic" = "モザイク";
 "Blur" = "ぼかし";
-"Censor Bar" = "黒帯";
 "Privacy" = "プライバシー";
 "No look applied" = "効果なし";
 "Reset look" = "効果をリセット";
 "Faces are covered in the photo and the video, not just on screen" = "顔は画面上だけでなく、写真と動画にも隠して記録されます";
 "Face censoring is unavailable in this build" = "このビルドでは顔の隠し処理を利用できません";
+
+/* Face effects and the chromatic privacy censor. */
+"Censor" = "検閲";
+"Face FX" = "顔エフェクト";
+"Big Eyes" = "デカ目";
+"Slim Face" = "小顔";
+"Funhouse" = "変顔";

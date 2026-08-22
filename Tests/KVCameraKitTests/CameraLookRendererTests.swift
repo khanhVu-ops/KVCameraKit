@@ -67,6 +67,18 @@ final class CameraLookRendererTests: XCTestCase {
         XCTAssertEqual(CapturedPhotoDecoder.orientation(for: result.data), .up)
     }
 
+    func test_fullCaptureExposureIsMatchedToItsPreviewWithinHalfAStop() throws {
+        let captured = try Self.solidJPEG(SIMD3<Float>(repeating: 0.25))
+        let reference = try Self.solidJPEG(SIMD3<Float>(repeating: 0.50))
+
+        let compensation = CameraLookRenderer.exposureCompensation(
+            captured: captured,
+            reference: reference
+        )
+
+        XCTAssertEqual(compensation, 0.5, accuracy: 0.03)
+    }
+
     private static func solidJPEG(_ rgb: SIMD3<Float>) throws -> Data {
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: 64, height: 64))
         let image = renderer.image { context in

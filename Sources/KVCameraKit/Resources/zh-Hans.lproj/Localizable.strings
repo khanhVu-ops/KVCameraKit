@@ -50,9 +50,15 @@
    name every stage that is currently changing the picture. */
 "Mosaic" = "马赛克";
 "Blur" = "模糊";
-"Censor Bar" = "黑条遮挡";
 "Privacy" = "隐私";
 "No look applied" = "未应用任何风格";
 "Reset look" = "重置风格";
 "Faces are covered in the photo and the video, not just on screen" = "人脸在照片和视频中同样被遮盖，不只是在屏幕上";
 "Face censoring is unavailable in this build" = "此版本不支持人脸遮盖";
+
+/* Face effects and the chromatic privacy censor. */
+"Censor" = "审查";
+"Face FX" = "脸部特效";
+"Big Eyes" = "大眼";
+"Slim Face" = "瘦脸";
+"Funhouse" = "哈哈镜";

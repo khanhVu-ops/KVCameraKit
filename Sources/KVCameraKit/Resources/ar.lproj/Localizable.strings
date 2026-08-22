@@ -50,9 +50,15 @@
    name every stage that is currently changing the picture. */
 "Mosaic" = "موزاييك";
 "Blur" = "تمويه";
-"Censor Bar" = "شريط حجب";
 "Privacy" = "الخصوصية";
 "No look applied" = "لم يتم تطبيق أي مظهر";
 "Reset look" = "إعادة تعيين المظهر";
 "Faces are covered in the photo and the video, not just on screen" = "الوجوه مغطاة في الصورة والفيديو، وليس على الشاشة فقط";
 "Face censoring is unavailable in this build" = "حجب الوجوه غير متوفر في هذا الإصدار";
+
+/* Face effects and the chromatic privacy censor. */
+"Censor" = "رقابة";
+"Face FX" = "مؤثرات الوجه";
+"Big Eyes" = "عيون كبيرة";
+"Slim Face" = "وجه نحيف";
+"Funhouse" = "مرآة مشوهة";

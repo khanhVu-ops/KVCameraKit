@@ -22,8 +22,8 @@ struct CensorPixelTests {
     private let size = CGSize(width: 400, height: 300)
 
     /// Fine vertical stripes. Chosen because every mode destroys them in a way a sampled pixel
-    /// can see: the mosaic averages them into flat blocks, the blur into grey, the bar into
-    /// black. A flat-coloured test image would pass all three while doing nothing.
+    /// can see: the mosaic averages them into flat blocks, the blur into grey, and the chromatic
+    /// censor splits and smears their channels. A flat-coloured image would prove little.
     private func stripes() -> CIImage {
         CIImage(color: .white)
             .cropped(to: CGRect(origin: .zero, size: size))
@@ -81,7 +81,6 @@ struct CensorPixelTests {
 
             // Well inside the ellipse. 0.1 of 400 is a 40 px semi-axis, so the centre patch at
             // 20 px across is comfortably within it even after the feather.
-            let inside = CGRect(x: 190, y: 140, width: 20, height: 20)
             // A corner, which no region touches. This is the assertion that a filter escaped
             // its crop — the first implementation blurred and pixellated the *whole frame* and
             // relied on a mask to hide it, so a mask in the wrong space leaked everywhere.
@@ -107,13 +106,14 @@ struct CensorPixelTests {
         }
     }
 
-    @Test("The bar is opaque black, not a tinted average")
-    func barIsBlack() {
+    @Test("The chromatic censor destroys detail without painting a black rectangle")
+    func chromaticCensorKeepsColour() {
         let rendered = CensorRenderer.render(image: stripes(), mode: .censorBar, regions: [centreRegion])
-        // The bar sits above the ellipse's centre, because the padding is biased upward for
-        // hair — so y is above 150 in this y-down sampling, not at it.
-        let luma = meanLuma(rendered, in: CGRect(x: 190, y: 155, width: 20, height: 10))
-        #expect(luma < 12, "the bar averaged the stripes instead of covering them (\(luma))")
+        let centre = pixel(rendered, x: 200, y: 150)
+        let luma = (Int(centre[0]) + Int(centre[1]) + Int(centre[2])) / 3
+        #expect(luma > 18, "the new censor regressed to an opaque black rectangle")
+        #expect(max(centre[0], centre[1], centre[2]) - min(centre[0], centre[1], centre[2]) > 8,
+                "the censor did not split the colour channels")
     }
 
     @Test("A region at the frame's edge is clipped, not dropped")
@@ -133,6 +133,33 @@ struct CensorPixelTests {
         let left = pixel(rendered, x: 5, y: 150)
         let right = pixel(rendered, x: 7, y: 150)
         #expect(abs(Int(left[0]) - Int(right[0])) < 40, "the visible part of an edge region was left alone")
+    }
+
+    @Test("Every Face FX warp changes the face and leaves the frame edge untouched")
+    func faceEffectsStayBounded() {
+        let source = CIFilter(name: "CICheckerboardGenerator", parameters: [
+            kCIInputCenterKey: CIVector(x: 0, y: 0),
+            "inputColor0": CIColor(red: 0.95, green: 0.25, blue: 0.15),
+            "inputColor1": CIColor(red: 0.1, green: 0.35, blue: 0.95),
+            kCIInputWidthKey: 11.0,
+            "inputSharpness": 0.9
+        ])?.outputImage?.cropped(to: CGRect(origin: .zero, size: size)) ?? stripes()
+
+        for effect in CameraFaceEffect.allCases where effect.isEnabled {
+            let rendered = FaceEffectRenderer.render(image: source, effect: effect, regions: [centreRegion])
+            #expect(rendered.extent == source.extent)
+            #expect(pixel(rendered, x: 4, y: 4) == pixel(source, x: 4, y: 4), "\(effect) escaped the face")
+
+            var difference = 0
+            for y in stride(from: 120, through: 180, by: 10) {
+                for x in stride(from: 160, through: 240, by: 10) {
+                    let before = pixel(source, x: x, y: y)
+                    let after = pixel(rendered, x: x, y: y)
+                    difference += zip(before, after).reduce(0) { $0 + abs(Int($1.0) - Int($1.1)) }
+                }
+            }
+            #expect(difference > 500, "\(effect) left the face effectively unchanged")
+        }
     }
 
     @Test("Three faces at three angles all encode to a real PNG")

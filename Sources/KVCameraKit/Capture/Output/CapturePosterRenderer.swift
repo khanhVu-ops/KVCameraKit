@@ -5,9 +5,9 @@ import Foundation
 /// A poster frame from a sample buffer, for a recording whose file nobody can read.
 ///
 /// It exists because streaming took away the old source of one. With a file on disk,
-/// `AVAssetImageGenerator` produces a poster by decoding the first frame back out of it —
+/// `AVAssetImageGenerator` produces a poster by decoding a frame back out of it —
 /// but a streamed recording is encrypted by the time it lands, so there is nothing to
-/// decode. Taking it on the way *in* costs one JPEG encode at the start of a recording and
+/// decode. Taking candidates on the way *in* costs two small JPEG encodes per recording and
 /// needs no decode at all.
 enum CapturePosterRenderer {
 

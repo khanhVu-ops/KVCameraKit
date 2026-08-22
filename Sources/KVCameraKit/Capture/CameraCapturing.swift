@@ -179,6 +179,9 @@ protocol CameraCapturing: AnyObject, Sendable {
     func setExposureBias(_ bias: Float)
     func setTorch(on: Bool)
     func capturePhoto() async throws -> CapturedPhoto?
+    /// Precompiles any selected GPU recording effects. The ViewModel awaits this before it
+    /// opens the writer, so the first stored frame never pays Core Image's lazy compilation.
+    func prepareRecordingEffects() async
     func startRecording(to destination: RecordingDestination)
     /// `nil` when nothing was recorded — which is a real outcome, not an error: a writer
     /// that never received a sample would otherwise finish a valid, trackless file, and
@@ -204,8 +207,12 @@ protocol CameraCapturing: AnyObject, Sendable {
     /// triggering a second pipeline rebuild on a running session.
     func setHardwareControlLabels(_ labels: CameraControlLabels)
 
-    /// The active privacy censor mode (Off / Mosaic / Blur / Censor Bar).
+    /// The active privacy censor mode (Off / Mosaic / Blur / chromatic Censor).
     var censorMode: CameraCensorMode { get set }
+
+    /// The active playful face warp. It shares detection with the privacy censor but carries
+    /// no anonymity guarantee of its own.
+    var faceEffect: CameraFaceEffect { get set }
 
     /// Whether this configuration can honour a censor mode at all — see
     /// `CameraService.isCensorSupported`. The screen hides the control when it cannot, because
@@ -242,9 +249,11 @@ protocol CameraCapturing: AnyObject, Sendable {
 extension CameraCapturing {
     func setHardwareControlLabels(_ labels: CameraControlLabels) {}
     var censorMode: CameraCensorMode { get { .off } set {} }
+    var faceEffect: CameraFaceEffect { get { .off } set {} }
     var isCensorSupported: Bool { false }
     var censorRegions: [CensorRegion] { [] }
     var onHorizonMotion: (@Sendable (Double, Bool) -> Void)? { get { nil } set {} }
     func startMotionObserver() {}
     func stopMotionObserver() {}
+    func prepareRecordingEffects() async {}
 }

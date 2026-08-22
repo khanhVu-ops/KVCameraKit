@@ -145,7 +145,8 @@ struct CensorHeader {
     /// ratio the ellipse comes out sheared and the roll with it.
     float2 imageSize;
     int count;
-    int unused;
+    /// 0 off, 1 big eyes, 2 slim face, 3 funhouse.
+    int faceEffect;
 };
 
 /// How many cells across the face, for the mosaic.
@@ -155,15 +156,9 @@ struct CensorHeader {
 /// distant face landed inside two cells and became a grey smudge while a close one kept
 /// recognisable features. A fixed count means the look is the same at every distance, which is
 /// what the censorship style being imitated actually does.
-constant float2 kMosaicCells = float2(9.0, 11.0);
+constant float2 kMosaicCells = float2(7.0, 9.0);
 
-/// Half-extents of the bar, in the ellipse's own frame.
-///
-/// Local y runs -1 at the top of the padded region to +1 at the bottom, and the padding is
-/// biased upward to cover hair — so the eyes sit above centre rather than at it. Slightly wider
-/// than the face because a censor bar that stops exactly at the cheeks reads as a mistake.
-constant float2 kBarHalfExtent = float2(1.02, 0.275);
-constant float kBarCenterY = -0.175;
+constant float kChromaticShift = 0.105;
 
 /// Where the ellipse feather begins, as a fraction of the semi-axis.
 constant float kCensorFeatherStart = 0.86;
@@ -189,6 +184,55 @@ static inline float2 censorUV(float2 local, CensorEllipse e, float2 imageSize) {
     return e.center + offset / imageSize;
 }
 
+/// Circular local coordinates for Blur. The larger face axis is used as the radius, so the
+/// round mask remains conservative around hair and jaw instead of becoming the old capsule.
+static inline float2 censorCircleLocal(float2 uv, CensorEllipse e, float2 imageSize) {
+    float2 offset = (uv - e.center) * imageSize;
+    float s = e.rollSinCos.x;
+    float c = e.rollSinCos.y;
+    float2 rotated = float2(offset.x * c + offset.y * s, -offset.x * s + offset.y * c);
+    float radius = max(e.radius.x, e.radius.y) * imageSize.x;
+    return rotated / max(radius, 1e-5);
+}
+
+static inline float2 magnified(float2 local, float2 centre, float radius, float amount) {
+    float2 delta = (local - centre) / radius;
+    float distance = length(delta);
+    if (distance >= 1.0) { return local; }
+    float edge = smoothstep(0.0, 1.0, distance);
+    return centre + delta * radius * mix(1.0 - amount, 1.0, edge);
+}
+
+/// Inverse face warps. All three run in the face's rolled local coordinates and reuse the
+/// privacy tracker's regions, so Face FX adds no Vision work and no render pass.
+static float2 applyFaceEffectUV(
+    float2 uv,
+    constant CensorHeader &header,
+    constant CensorEllipse *regions
+) {
+    if (header.faceEffect == 0) { return uv; }
+
+    float2 result = uv;
+    for (int index = 0; index < header.count; ++index) {
+        CensorEllipse region = regions[index];
+        float2 local = censorLocal(result, region, header.imageSize);
+        float distance = length(local);
+        if (distance >= 1.0) { continue; }
+
+        if (header.faceEffect == 1) {
+            local = magnified(local, float2(-0.32, -0.18), 0.31, 0.46);
+            local = magnified(local, float2( 0.32, -0.18), 0.31, 0.46);
+        } else if (header.faceEffect == 2) {
+            float weight = 1.0 - smoothstep(0.45, 1.0, distance);
+            local.x *= 1.0 + 0.34 * weight;
+        } else if (header.faceEffect == 3) {
+            local *= mix(0.58, 1.0, smoothstep(0.0, 1.0, distance));
+        }
+        result = censorUV(local, region, header.imageSize);
+    }
+    return result;
+}
+
 /// Samples the source on a grid inside the face, in the face's own frame.
 ///
 /// A box blur rather than a Gaussian, and the taps are placed in *local* units so the blur
@@ -203,11 +247,32 @@ static float3 censorBlur(Source source, float2 local, CensorEllipse e, float2 im
     float3 sum = float3(0.0);
     for (int j = -2; j <= 2; ++j) {
         for (int i = -2; i <= 2; ++i) {
-            float2 tap = local + float2(float(i), float(j)) * 0.23;
+            float2 tap = local + float2(float(i), float(j)) * 0.30;
             sum += source.rgb(censorUV(tap, e, imageSize));
         }
     }
     return sum / 25.0;
+}
+
+/// Chromatic displacement: a curved, channel-split warp that destroys facial structure while
+/// retaining the scene's colour. Three taps, only inside a face, replace the opaque black bar.
+template <typename Source>
+static float3 censorChromatic(Source source, float2 local, CensorEllipse e, float2 imageSize) {
+    float distance = length(local);
+    float strength = (1.0 - smoothstep(0.35, 1.0, distance));
+    float wave = sin(local.y * 24.0 + local.x * 7.0) * 0.45 + 0.55;
+    float shift = kChromaticShift * strength * (0.72 + wave);
+    float warp = sin(floor((local.y + 1.0) * 13.0) * 2.31) * shift * 0.55;
+    float3 sum = float3(0.0);
+    for (int tap = -1; tap <= 1; ++tap) {
+        float spread = float(tap) * 0.055;
+        sum.r += source.rgb(censorUV(local + float2( shift + warp + spread, spread * 0.25), e, imageSize)).r;
+        sum.g += source.rgb(censorUV(local + float2(warp + spread, shift * 0.18), e, imageSize)).g;
+        sum.b += source.rgb(censorUV(local + float2(-shift + warp + spread, -spread * 0.25), e, imageSize)).b;
+    }
+    float3 separated = sum / 3.0;
+    float colourBand = 0.11 * strength;
+    return saturate(separated + float3(colourBand * (0.65 + wave * 0.35), -colourBand * 0.18, colourBand));
 }
 
 /// The mean of one mosaic cell.
@@ -245,7 +310,7 @@ struct CensorResult {
     float coverage;
 };
 
-/// The destructive half of the censor — mosaic and blur — applied to the **raw** frame, before
+/// The destructive censor — mosaic, blur or chromatic displacement — applied to the **raw** frame, before
 /// tone and the LUT.
 ///
 /// Before, and that is not arbitrary. These two are spatial averages, so they have to consume
@@ -255,7 +320,6 @@ struct CensorResult {
 /// rectangle. For an affine tone the two orders are identical anyway — the LUT is what makes
 /// the difference visible, and this is the order the still path uses.
 ///
-/// The bar is deliberately *not* here. See `applyCensorBar`.
 template <typename Source>
 static CensorResult applyCensor(
     Source source,
@@ -268,12 +332,13 @@ static CensorResult applyCensor(
 
     for (int index = 0; index < header.count; ++index) {
         CensorEllipse region = regions[index];
-        // The bar is an overlay applied after grading; mosaic (1) and blur (2) are the two
-        // that belong here.
-        if (region.mode < 0.5 || region.mode > 2.5) { continue; }
+        if (region.mode < 0.5) { continue; }
 
         float2 local = censorLocal(uv, region, header.imageSize);
-        float distance = length(local);
+        float2 maskLocal = region.mode > 1.5 && region.mode < 2.5
+            ? censorCircleLocal(uv, region, header.imageSize)
+            : local;
+        float distance = length(maskLocal);
         if (distance >= 1.0) { continue; }
 
         // Feathered over the outer edge. One `smoothstep` on the ellipse distance, which is
@@ -282,43 +347,20 @@ static CensorResult applyCensor(
         // full-frame filter.
         float alpha = 1.0 - smoothstep(kCensorFeatherStart, 1.0, distance);
 
-        float3 effect = region.mode < 1.5
-            ? censorMosaic(source, local, region, header.imageSize)
-            : censorBlur(source, local, region, header.imageSize);
+        float3 effect;
+        if (region.mode < 1.5) {
+            effect = censorMosaic(source, local, region, header.imageSize);
+        } else if (region.mode < 2.5) {
+            effect = censorBlur(source, local, region, header.imageSize);
+        } else {
+            effect = censorChromatic(source, local, region, header.imageSize);
+        }
 
         result.colour = mix(result.colour, effect, alpha);
         result.coverage = max(result.coverage, alpha);
     }
 
     return result;
-}
-
-/// The bar, painted **last**, over the finished picture.
-///
-/// Last because a censor bar is an object placed on top of a photograph, not a region of it.
-/// Run before the LUT — which is where it used to be — a strong preset tints it, so Film Noir
-/// produced a dark grey bar in the viewfinder and the file got a black one from the Core Image
-/// path, which applied it afterwards. Same stage, both sides, and the bar is black in both.
-///
-/// Hard-edged on purpose: the whole look of a censor bar is that it is obviously applied, so
-/// feathering it would be wrong.
-static float3 applyCensorBar(
-    float3 colour,
-    float2 uv,
-    constant CensorHeader &header,
-    constant CensorEllipse *regions
-) {
-    for (int index = 0; index < header.count; ++index) {
-        CensorEllipse region = regions[index];
-        if (region.mode < 2.5) { continue; }
-
-        float2 local = censorLocal(uv, region, header.imageSize);
-        float2 fromBar = abs(local - float2(0.0, kBarCenterY));
-        if (all(fromBar <= kBarHalfExtent)) {
-            return float3(0.0);
-        }
-    }
-    return colour;
 }
 
 // MARK: - Beauty
@@ -408,34 +450,22 @@ static float3 applyBeauty(
 
 // MARK: - Film
 
-static inline float hashNoise(float2 point) {
-    return fract(sin(dot(point, float2(12.9898, 78.233))) * 43758.5453);
-}
-
-static inline float filmNoise2D(float2 p) {
-    float2 i = floor(p);
-    float2 f = fract(p);
-    float2 u = f * f * (3.0 - 2.0 * f);
-
-    float a = hashNoise(i);
-    float b = hashNoise(i + float2(1.0, 0.0));
-    float c = hashNoise(i + float2(0.0, 1.0));
-    float d = hashNoise(i + float2(1.0, 1.0));
-
-    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
-}
-
-static inline float organicFilmGrain(float2 p) {
-    float n1 = filmNoise2D(p);
-    float n2 = filmNoise2D(p * 2.17 + float2(13.7, 31.9));
-    return (n1 * 0.65 + n2 * 0.35) - 0.5;
-}
-
 /// Grain cells across the **height of the upright image**.
-constant float kGrainCellsAcrossHeight = 320.0;
+constant float kGrainCellsAcrossHeight = 220.0;
+constant float kGrainTileCells = 128.0;
+constant float kGrainAmplitude = 0.075;
+constant float kGrainShadowStart = 0.03;
+constant float kGrainShadowFull = 0.22;
+constant float kGrainHighlightStart = 0.65;
+constant float kGrainHighlightEnd = 0.90;
 
 /// Grain and the light leak, placed in the **upright** image rather than in the sensor buffer.
-static float3 applyFilm(float3 rgb, float2 uv, constant LookUniform &look) {
+static float3 applyFilm(
+    float3 rgb,
+    float2 uv,
+    texture2d<float> grainTexture,
+    constant LookUniform &look
+) {
     if (look.grainIntensity <= 0.001 && look.lightLeakIntensity <= 0.001) { return rgb; }
 
     float2 upright = look.uprightRotation * (uv - 0.5) + 0.5;
@@ -446,18 +476,29 @@ static float3 applyFilm(float3 rgb, float2 uv, constant LookUniform &look) {
 
     if (look.grainIntensity > 0.001) {
         float2 cells = float2(kGrainCellsAcrossHeight / aspect, kGrainCellsAcrossHeight);
-        float2 cell = upright * cells + float2(look.grainPhase * 1.618, look.grainPhase * 0.618);
-
-        // Multi-octave organic grain (smooth dye clouds instead of sharp white dots)
-        float grainVal = organicFilmGrain(cell);
+        float2 phase = float2(
+            fract(look.grainPhase * 0.7548777),
+            fract(look.grainPhase * 0.5698403)
+        );
+        constexpr sampler emulsionSampler(
+            mag_filter::linear,
+            min_filter::linear,
+            address::repeat
+        );
+        // These are the same baked dye-cloud bytes Core Image repeats for chips and stills.
+        float grainVal = grainTexture.sample(
+            emulsionSampler,
+            upright * cells / kGrainTileCells + phase
+        ).r - 0.5;
 
         // Real dye-cloud density curve:
         // Grain is strongest in midtones (0.15 - 0.65), rolls off in deep shadows (< 0.05) and specular highlights (> 0.85)
         float luma = dot(result, float3(0.2126, 0.7152, 0.0722));
-        float grainMask = smoothstep(0.03, 0.22, luma) * (1.0 - smoothstep(0.65, 0.90, luma));
+        float grainMask = smoothstep(kGrainShadowStart, kGrainShadowFull, luma)
+            * (1.0 - smoothstep(kGrainHighlightStart, kGrainHighlightEnd, luma));
 
         // Soft organic dye cloud modulation with analog warm tint
-        float grain = grainVal * look.grainIntensity * 0.075 * grainMask;
+        float grain = grainVal * look.grainIntensity * kGrainAmplitude * grainMask;
         result = saturate(result + grain * float3(1.0, 0.98, 0.94));
     }
 
@@ -487,16 +528,18 @@ static float3 applyLook(
     float2 uv,
     float4x4 tone,
     texture3d<float, access::sample> lut,
+    texture2d<float> grainTexture,
     constant LookUniform &look,
     constant CensorHeader &censor,
     constant CensorEllipse *regions
 ) {
-    float3 raw = source.rgb(uv);
+    float2 faceUV = applyFaceEffectUV(uv, censor, regions);
+    float3 raw = source.rgb(faceUV);
     CensorResult censored = applyCensor(source, uv, raw, censor, regions);
     float3 graded = applyLUT(applyTone(censored.colour, tone), lut);
-    float3 smoothed = applyBeauty(source, uv, raw, graded, censored.coverage, tone, lut, look);
-    float3 textured = applyFilm(smoothed, uv, look);
-    return applyCensorBar(textured, uv, censor, regions);
+    float3 smoothed = applyBeauty(source, faceUV, raw, graded, censored.coverage, tone, lut, look);
+    float3 textured = applyFilm(smoothed, uv, grainTexture, look);
+    return textured;
 }
 
 // MARK: - Sources
@@ -536,13 +579,14 @@ fragment float4 cameraLookFragmentBGRA(
     VertexOut in [[stage_in]],
     texture2d<float> source [[texture(0)]],
     texture3d<float> lut [[texture(1)]],
+    texture2d<float> grainTexture [[texture(2)]],
     constant float4x4 &tone [[buffer(0)]],
     constant LookUniform &look [[buffer(1)]],
     constant CensorHeader &censor [[buffer(2)]],
     constant CensorEllipse *regions [[buffer(3)]]
 ) {
     BGRASource reader { source };
-    return float4(applyLook(reader, in.texCoord, tone, lut, look, censor, regions), 1.0);
+    return float4(applyLook(reader, in.texCoord, tone, lut, grainTexture, look, censor, regions), 1.0);
 }
 
 /// YCbCr → RGB, then the look.
@@ -560,6 +604,7 @@ fragment float4 cameraLookFragmentYCbCr(
     texture2d<float> luma [[texture(0)]],
     texture2d<float> chroma [[texture(1)]],
     texture3d<float> lut [[texture(2)]],
+    texture2d<float> grainTexture [[texture(3)]],
     constant float3x3 &conversion [[buffer(0)]],
     constant float3 &offset [[buffer(1)]],
     constant float4x4 &tone [[buffer(2)]],
@@ -568,7 +613,7 @@ fragment float4 cameraLookFragmentYCbCr(
     constant CensorEllipse *regions [[buffer(5)]]
 ) {
     YCbCrSource reader { luma, chroma, conversion, offset };
-    return float4(applyLook(reader, in.texCoord, tone, lut, look, censor, regions), 1.0);
+    return float4(applyLook(reader, in.texCoord, tone, lut, grainTexture, look, censor, regions), 1.0);
 }
 
 // MARK: - Pass two: the screen

@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 /// The whole recipe, in Core Image, for the two places a fragment shader cannot reach: a
 /// captured still and the chips on the filter strip.
 ///
-/// **Censor (mosaic/blur) → tone → LUT → beauty → film → censor bar.** That order is the
+/// **Face warp → censor → tone → LUT → beauty → film.** That order is the
 /// contract with `CameraPreview.metal`, and it is the fix for the worst class of bug this file
 /// can have. Until now the shader censored first and the capture path censored *last*, each
 /// with a comment claiming it matched the other — so a censor bar under Film Noir came out grey
@@ -31,6 +31,27 @@ enum CameraLookRenderer {
         .useSoftwareRenderer: false
     ])
 
+    /// The exact emulsion field also uploaded by `CameraPreviewRenderer`.
+    nonisolated(unsafe) private static let grainTile: CIImage? = {
+        let dimension = CameraFilmSimulation.grainTileDimension
+        let bytes = Data(CameraFilmSimulation.grainTileBytes)
+        guard let provider = CGDataProvider(data: bytes as CFData),
+              let image = CGImage(
+                width: dimension,
+                height: dimension,
+                bitsPerComponent: 8,
+                bitsPerPixel: 8,
+                bytesPerRow: dimension,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: true,
+                intent: .defaultIntent
+              ) else { return nil }
+        return CIImage(cgImage: image)
+    }()
+
     /// Encoded bytes for a captured still, with the look and the censor both applied.
     ///
     /// `regions` are the geometry the viewfinder was drawing, in normalised sensor-buffer space.
@@ -48,13 +69,15 @@ enum CameraLookRenderer {
     static func apply(
         filter: CameraFilter,
         beauty: CameraBeauty,
+        faceEffect: CameraFaceEffect = .off,
         censorMode: CameraCensorMode = .off,
         liveRegions: [CensorRegion] = [],
         to data: Data,
+        sourceExposureCompensation: Float = 0,
         quality: CGFloat = 0.95
     ) -> (data: Data, fileExtension: String)? {
         let wantsLook = !filter.isNeutral || beauty.isEnabled
-        guard wantsLook || censorMode.isEnabled else {
+        guard wantsLook || faceEffect.isEnabled || censorMode.isEnabled else {
             return (data, CapturedPhotoDecoder.fileExtension(for: data))
         }
         guard let source = CIImage(data: data) else { return nil }
@@ -68,7 +91,9 @@ enum CameraLookRenderer {
         let orientation = CapturedPhotoDecoder.orientation(for: data)
         let rotationDegrees = CensorGeometry.rotationDegrees(for: orientation)
 
-        let regions = censorMode.isEnabled ? censorRegions(live: liveRegions, in: source) : []
+        let regions = (censorMode.isEnabled || faceEffect.isEnabled)
+            ? censorRegions(live: liveRegions, in: source)
+            : []
 
         // Nothing to do and nothing detected: hand the original bytes back rather than paying a
         // re-encode to change nothing. This is what keeps a censor-on photo of an empty room an
@@ -77,10 +102,16 @@ enum CameraLookRenderer {
             return (data, CapturedPhotoDecoder.fileExtension(for: data))
         }
 
+        let matchedSource = sourceExposureCompensation.magnitude > 0.001
+            ? source.applyingFilter("CIExposureAdjust", parameters: [
+                kCIInputEVKey: sourceExposureCompensation
+            ])
+            : source
         let rendered = render(
-            source,
+            matchedSource,
             filter: filter,
             beauty: beauty,
+            faceEffect: faceEffect,
             censorMode: censorMode,
             regions: regions,
             rotationDegrees: rotationDegrees,
@@ -98,6 +129,23 @@ enum CameraLookRenderer {
             .settingProperties([kCGImagePropertyOrientation as String: 1])
 
         return encode(upright, like: data, colorSpace: source.colorSpace, quality: quality)
+    }
+
+    /// The full-resolution photo and AVFoundation's preview representation can be tone-mapped
+    /// differently even though they came from one shutter press. Match their scene brightness
+    /// before the common look is applied, otherwise the same matrix/LUT correctly produces two
+    /// differently bright results from two differently bright inputs.
+    static func exposureCompensation(captured: Data, reference: Data) -> Float {
+        guard let capturedImage = CIImage(data: captured),
+              let referenceImage = CIImage(data: reference),
+              let capturedLuma = logAverageLuminance(capturedImage),
+              let referenceLuma = logAverageLuminance(referenceImage),
+              capturedLuma > 0.001,
+              referenceLuma > 0.001 else { return 0 }
+
+        // Half a stop is enough to reconcile Apple's two output representations without
+        // turning this into auto-enhance or fighting an intentional exposure choice.
+        return min(max(log2(referenceLuma / capturedLuma), -0.5), 0.5)
     }
 
     /// One look per filter, from the same base frame, for the filter strip.
@@ -120,6 +168,7 @@ enum CameraLookRenderer {
                 source,
                 filter: filter,
                 beauty: beauty,
+                faceEffect: .off,
                 censorMode: .off,
                 regions: [],
                 // The base frame is already upright — `ToneRenderer.thumbnailBase` turns it —
@@ -143,12 +192,14 @@ enum CameraLookRenderer {
         _ source: CIImage,
         filter: CameraFilter,
         beauty: CameraBeauty,
+        faceEffect: CameraFaceEffect = .off,
         censorMode: CameraCensorMode = .off,
         regions: [CensorRegion] = [],
         rotationDegrees: CGFloat = 0,
         grainSeed: Float
     ) -> CIImage {
-        let censored = CensorRenderer.renderDestructive(image: source, mode: censorMode, regions: regions)
+        let warped = FaceEffectRenderer.render(image: source, effect: faceEffect, regions: regions)
+        let censored = CensorRenderer.renderDestructive(image: warped, mode: censorMode, regions: regions)
 
         let toned = filter.tone.isNeutral
             ? censored
@@ -175,8 +226,8 @@ enum CameraLookRenderer {
             rotationDegrees: rotationDegrees,
             seed: grainSeed
         )
-        let barred = CensorRenderer.renderBar(image: textured, mode: censorMode, regions: regions)
-        return barred.cropped(to: source.extent)
+        return CensorRenderer.renderBar(image: textured, mode: censorMode, regions: regions)
+            .cropped(to: source.extent)
     }
 
     // MARK: - Stages
@@ -291,26 +342,56 @@ enum CameraLookRenderer {
         let upright = CensorGeometry.uprightSize(sensorSize: extent.size, rotationDegrees: rotationDegrees)
         var output = image
 
-        if film.grain > 0.001,
-           let noise = CIFilter(name: "CIRandomGenerator")?.outputImage {
+        if film.grain > 0.001, let grainTile {
             let cell = CameraFilmSimulation.grainCellSize(uprightHeight: upright.height)
-            let cells = noise
+            let tileScale = cell / CGFloat(CameraFilmSimulation.grainTexelsPerCell)
+            let offset = CameraFilmSimulation.grainTileOffset(seed: seed)
+            let cells = grainTile
                 .samplingLinear()
-                .transformed(by: CGAffineTransform(scaleX: cell, y: cell))
+                .transformed(by: CGAffineTransform(scaleX: tileScale, y: tileScale))
                 .transformed(by: CGAffineTransform(
-                    translationX: CGFloat(seed * 997).rounded() * cell,
-                    y: CGFloat(seed * 613).rounded() * cell
+                    translationX: -offset.x * tileScale,
+                    y: -offset.y * tileScale
                 ))
+                .applyingFilter("CIAffineTile")
 
-            let amount = CameraFilmSimulation.grainAmplitude * CGFloat(film.grain) * 0.75
+            let amount = CameraFilmSimulation.grainAmplitude * CGFloat(film.grain)
             let grain = cells.applyingFilter("CIColorMatrix", parameters: [
-                "inputRVector": CIVector(x: amount * 0.2126, y: amount * 0.7152, z: amount * 0.0722, w: 0),
-                "inputGVector": CIVector(x: amount * 0.2126 * 0.98, y: amount * 0.7152 * 0.98, z: amount * 0.0722 * 0.98, w: 0),
-                "inputBVector": CIVector(x: amount * 0.2126 * 0.94, y: amount * 0.7152 * 0.94, z: amount * 0.0722 * 0.94, w: 0),
-                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-                "inputBiasVector": CIVector(x: -amount * 0.5, y: -amount * 0.5 * 0.98, z: -amount * 0.5 * 0.94, w: 1)
+                "inputRVector": CIVector(x: amount, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: amount * 0.98, y: 0, z: 0, w: 0),
+                "inputBVector": CIVector(x: amount * 0.94, y: 0, z: 0, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(
+                    x: -amount * 0.5,
+                    y: -amount * 0.5 * 0.98,
+                    z: -amount * 0.5 * 0.94,
+                    w: 0
+                )
             ]).cropped(to: extent)
-            output = grain.applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: output])
+
+            // Film density is not white-noise sprinkled uniformly over the frame. Dye clouds
+            // read in the midtones and recede at both ends, using the same smoothstep product
+            // as the live shader.
+            let luma = luminance(of: output)
+            let shadowResponse = smoothstep(
+                luma,
+                from: CameraFilmSimulation.grainShadowStart,
+                to: CameraFilmSimulation.grainShadowFull
+            )
+            let highlightResponse = inverted(smoothstep(
+                luma,
+                from: CameraFilmSimulation.grainHighlightStart,
+                to: CameraFilmSimulation.grainHighlightEnd
+            ))
+            let density = shadowResponse.applyingFilter("CIMultiplyCompositing", parameters: [
+                kCIInputBackgroundImageKey: highlightResponse
+            ])
+            let shapedGrain = grain.applyingFilter("CIMultiplyCompositing", parameters: [
+                kCIInputBackgroundImageKey: density
+            ])
+            output = shapedGrain.applyingFilter("CIAdditionCompositing", parameters: [
+                kCIInputBackgroundImageKey: output
+            ])
         }
 
         if film.lightLeak > 0.001 {
@@ -341,6 +422,88 @@ enum CameraLookRenderer {
             }
         }
         return output
+    }
+
+    private static func luminance(of image: CIImage) -> CIImage {
+        image.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0),
+            "inputGVector": CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0),
+            "inputBVector": CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0),
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)
+        ])
+    }
+
+    /// Core Image has no built-in smoothstep filter. Normalise and clamp first, then evaluate
+    /// `3t² - 2t³`, exactly the function Metal's `smoothstep` uses.
+    private static func smoothstep(_ image: CIImage, from lower: CGFloat, to upper: CGFloat) -> CIImage {
+        let scale = 1 / max(upper - lower, 0.0001)
+        let normalised = image
+            .applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: scale, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: scale, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: scale, w: 0),
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                "inputBiasVector": CIVector(x: -lower * scale, y: -lower * scale, z: -lower * scale, w: 0)
+            ])
+            .applyingFilter("CIColorClamp", parameters: [
+                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)
+            ])
+        let polynomial = CIVector(x: 0, y: 0, z: 3, w: -2)
+        return normalised.applyingFilter("CIColorPolynomial", parameters: [
+            "inputRedCoefficients": polynomial,
+            "inputGreenCoefficients": polynomial,
+            "inputBlueCoefficients": polynomial,
+            "inputAlphaCoefficients": CIVector(x: 0, y: 1, z: 0, w: 0)
+        ])
+    }
+
+    private static func inverted(_ image: CIImage) -> CIImage {
+        image.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: -1, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: -1, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: -1, w: 0),
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+            "inputBiasVector": CIVector(x: 1, y: 1, z: 1, w: 0)
+        ])
+    }
+
+    /// Log-average tracks perceived midtone brightness and is far less sensitive than a plain
+    /// average to one lamp or window occupying a small part of the frame.
+    private static func logAverageLuminance(_ image: CIImage) -> Float? {
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0,
+              extent.width.isFinite, extent.height.isFinite,
+              extent.minX.isFinite, extent.minY.isFinite else { return nil }
+        let longest: CGFloat = 32
+        let scale = min(longest / extent.width, longest / extent.height)
+        let reduced = image
+            .transformed(by: CGAffineTransform(
+                translationX: -extent.minX,
+                y: -extent.minY
+            ))
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let width = max(Int(reduced.extent.width.rounded(.down)), 1)
+        let height = max(Int(reduced.extent.height.rounded(.down)), 1)
+        var pixels = [Float](repeating: 0, count: width * height * 4)
+        context.render(
+            reduced,
+            toBitmap: &pixels,
+            rowBytes: width * 4 * MemoryLayout<Float>.size,
+            bounds: CGRect(x: 0, y: 0, width: width, height: height),
+            format: .RGBAf,
+            colorSpace: nil
+        )
+
+        var logarithmicSum: Float = 0
+        var sampleCount: Float = 0
+        for index in stride(from: 0, to: pixels.count, by: 4) where pixels[index + 3] > 0.5 {
+            let luma = pixels[index] * 0.2126 + pixels[index + 1] * 0.7152 + pixels[index + 2] * 0.0722
+            logarithmicSum += log(max(luma, 0.001))
+            sampleCount += 1
+        }
+        guard sampleCount > 0 else { return nil }
+        return exp(logarithmicSum / sampleCount)
     }
 
     // MARK: - Regions

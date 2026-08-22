@@ -620,15 +620,17 @@ final class CameraViewModelTests: XCTestCase {
 
         viewModel.send(.setFilter(.cinestill800T))
         viewModel.send(.setBeauty(CameraBeauty(smoothing: 0.4)))
+        viewModel.send(.setFaceEffect(.bigEyes))
         viewModel.send(.setCensorMode(.mosaic))
 
-        XCTAssertEqual(viewModel.state.activeLookStages.map(\.kind), [.filter, .beauty, .censor])
+        XCTAssertEqual(viewModel.state.activeLookStages.map(\.kind), [.filter, .beauty, .faceEffect, .censor])
         XCTAssertTrue(viewModel.state.hasActiveLook)
 
         viewModel.send(.resetLook)
         XCTAssertTrue(viewModel.state.activeLookStages.isEmpty)
         XCTAssertEqual(viewModel.state.filter.id, CameraFilter.original.id)
         XCTAssertEqual(viewModel.state.beauty, .off)
+        XCTAssertEqual(viewModel.state.faceEffect, .off)
         XCTAssertEqual(viewModel.state.censorMode, .off)
     }
 
@@ -646,6 +648,17 @@ final class CameraViewModelTests: XCTestCase {
 
         viewModel.send(.resetLook)
         XCTAssertEqual(camera.censorMode, .off)
+    }
+
+    func test_faceEffectIsSeparateFromPrivacyAndReachesTheCameraService() {
+        let camera = StubCamera()
+        let viewModel = makeViewModel(camera: camera)
+
+        viewModel.send(.setFaceEffect(.slimFace))
+
+        XCTAssertEqual(viewModel.state.faceEffect, .slimFace)
+        XCTAssertEqual(camera.faceEffect, .slimFace)
+        XCTAssertEqual(viewModel.state.censorMode, .off)
     }
 
     func test_beautyClampsAndComposesWithTheSelectedFilter() {
@@ -779,6 +792,24 @@ final class CameraViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.state.latestCapturedThumbnailData, StubVideoSink.thumbnail)
         XCTAssertEqual(sink.cancelCount, 0)
         XCTAssertFalse(viewModel.state.isSealing)
+    }
+
+    /// The writer must not receive its first timestamp until the selected Core Image graph is
+    /// ready. Otherwise its first stored frame freezes while lazy GPU compilation catches up.
+    func test_recordingWaitsForFaceEffectPreparationBeforeStartingWriter() async throws {
+        let camera = StubCamera()
+        camera.prepareRecordingDelayNanoseconds = 150_000_000
+        let viewModel = makeViewModel(camera: camera, recordingEngine: .streamingAssetWriter)
+
+        viewModel.send(.setMode(.video))
+        viewModel.send(.setFaceEffect(.bigEyes))
+        viewModel.send(.shutterTapped)
+
+        try await Task.sleep(for: .milliseconds(30))
+        XCTAssertNil(camera.recordingDestination, "the writer started while its GPU graph was cold")
+
+        try await waitUntil { camera.recordingDestination != nil }
+        XCTAssertEqual(camera.prepareRecordingCount, 1)
     }
 
     /// A host that has not implemented streaming still records, to a file.
@@ -992,6 +1023,7 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
     /// never told the service" apart from "the service ignored it" — the default swallows the
     /// setter, which would make either assertion pass.
     var censorMode: CameraCensorMode = .off
+    var faceEffect: CameraFaceEffect = .off
 
     /// Stands in for a service configured with both engines that can carry a censor — the
     /// Metal preview and the asset writer. `false` is the release configuration, and it has its
@@ -1048,7 +1080,15 @@ private final class StubCamera: CameraCapturing, @unchecked Sendable {
     /// What a stop hands back. `nil` is the real "nothing was recorded" outcome.
     var recordingOutput: RecordingOutput?
     var stopRecordingError: Error?
+    var prepareRecordingDelayNanoseconds: UInt64 = 0
+    private(set) var prepareRecordingCount = 0
 
+    func prepareRecordingEffects() async {
+        prepareRecordingCount += 1
+        if prepareRecordingDelayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: prepareRecordingDelayNanoseconds)
+        }
+    }
     func startRecording(to destination: RecordingDestination) { recordingDestination = destination }
     func stopRecording() async throws -> RecordingOutput? {
         if let stopRecordingError { throw stopRecordingError }

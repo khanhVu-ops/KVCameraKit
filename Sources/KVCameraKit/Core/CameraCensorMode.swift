@@ -9,7 +9,7 @@ public enum CameraCensorMode: Equatable, Sendable, Hashable, CaseIterable {
     case mosaic
     /// Smooth Gaussian face blur.
     case blur
-    /// Solid black censor bar across the face / eye region.
+    /// Chromatic displacement that destroys facial detail without drawing a black rectangle.
     case censorBar
 
     public static var allCases: [CameraCensorMode] {
@@ -45,7 +45,7 @@ public enum CameraCensorMode: Equatable, Sendable, Hashable, CaseIterable {
         case .blur:
             return .cameraKit("Blur")
         case .censorBar:
-            return .cameraKit("Censor Bar")
+            return .cameraKit("Censor")
         }
     }
 

@@ -79,20 +79,35 @@ struct CameraLookParityTests {
             try shaderScalar("kGrainCellsAcrossHeight")
                 == Double(CameraFilmSimulation.grainCellsAcrossHeight)
         )
+        #expect(try shaderScalar("kGrainTileCells") == Double(CameraFilmSimulation.grainTileCells))
+        #expect(try shaderScalar("kGrainAmplitude") == Double(CameraFilmSimulation.grainAmplitude))
+        #expect(try shaderScalar("kGrainShadowStart") == Double(CameraFilmSimulation.grainShadowStart))
+        #expect(try shaderScalar("kGrainShadowFull") == Double(CameraFilmSimulation.grainShadowFull))
+        #expect(try shaderScalar("kGrainHighlightStart") == Double(CameraFilmSimulation.grainHighlightStart))
+        #expect(try shaderScalar("kGrainHighlightEnd") == Double(CameraFilmSimulation.grainHighlightEnd))
     }
 
-    /// The censor's shape, shared with `CensorRenderer`. Three numbers that decide where a bar
-    /// lands and where an ellipse stops, in two implementations.
+    @Test("the shared grain tile has useful range without changing mean exposure")
+    func sharedGrainTileIsCentred() {
+        let bytes = CameraFilmSimulation.grainTileBytes
+        #expect(bytes.count == CameraFilmSimulation.grainTileDimension * CameraFilmSimulation.grainTileDimension)
+        let minimum = bytes.min() ?? 0
+        let maximum = bytes.max() ?? 0
+        let mean = Double(bytes.reduce(0) { $0 + Int($1) }) / Double(bytes.count)
+        #expect(minimum < 75)
+        #expect(maximum > 180)
+        #expect(abs(mean - 127.5) < 5, "grain must not make the whole photograph brighter or darker")
+    }
+
+    @Test("the live look pass keeps sub-8-bit film detail")
+    func liveIntermediateIsHalfFloat() {
+        #expect(CameraPreviewRenderer.lookPixelFormat == .rgba16Float)
+    }
+
+    /// The censor's strength and shape constants, shared with `CensorRenderer`.
     @Test("the shader and CensorRenderer agree on the censor's shape")
     func censorShapeMatches() throws {
-        let barExtent = try shaderVector("kBarHalfExtent")
-        #expect(barExtent.0 == Double(CensorRenderer.barHalfExtent.width))
-        #expect(barExtent.1 == Double(CensorRenderer.barHalfExtent.height))
-
-        // The sign flips because Core Image's y runs up and the shader's runs down. Asserted as a
-        // negation rather than as two numbers, so a change on either side has to be deliberate.
-        #expect(try shaderScalar("kBarCenterY") == -Double(CensorRenderer.barCenterY))
-
+        #expect(try shaderScalar("kChromaticShift") == Double(CensorRenderer.chromaticShiftFraction))
         #expect(try shaderScalar("kCensorFeatherStart") == Double(CensorRenderer.featherStart))
 
         let cells = try shaderVector("kMosaicCells")
@@ -199,7 +214,30 @@ struct CameraLookParityTests {
         CIImage(color: colour).cropped(to: CGRect(origin: .zero, size: size))
     }
 
-    /// A region covering the centre of a 400x300 image, big enough that the bar is unambiguous.
+    private func lumaDeviation(_ image: CIImage) -> Double {
+        let extent = image.extent.integral
+        let width = Int(extent.width)
+        let height = Int(extent.height)
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        context.render(
+            image,
+            toBitmap: &bytes,
+            rowBytes: width * 4,
+            bounds: extent,
+            format: .RGBA8,
+            colorSpace: nil
+        )
+        let values = stride(from: 0, to: bytes.count, by: 4).map { index in
+            Double(bytes[index]) * 0.2126
+                + Double(bytes[index + 1]) * 0.7152
+                + Double(bytes[index + 2]) * 0.0722
+        }
+        let mean = values.reduce(0, +) / Double(values.count)
+        let variance = values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(values.count)
+        return variance.squareRoot()
+    }
+
+    /// A region covering the centre of a 400x300 image, large enough for pixel assertions.
     private var centreRegion: CensorRegion {
         CensorRegion(
             id: 1,
@@ -209,13 +247,9 @@ struct CameraLookParityTests {
         )
     }
 
-    /// The bar is painted after grading, so it is black however strong the look is.
-    ///
-    /// This is the discrepancy that shipped: the shader censored first, so Film Noir's LUT lifted
-    /// the bar to dark grey in the viewfinder, while Core Image censored last and wrote a black
-    /// one to the file. One control, two results.
-    @Test("a censor bar is black under a strong LUT")
-    func theBarIsBlackAfterGrading() {
+    /// The chromatic censor belongs to the image instead of painting an opaque rectangle.
+    @Test("the chromatic censor does not become a black bar under a strong LUT")
+    func chromaticCensorSurvivesGrading() {
         let rendered = CameraLookRenderer.render(
             flat(CIColor(red: 0.55, green: 0.4, blue: 0.3)),
             filter: .filmNoir,
@@ -226,7 +260,8 @@ struct CameraLookParityTests {
         )
 
         let centre = pixel(rendered, x: 200, y: 150)
-        #expect(centre[0] == 0 && centre[1] == 0 && centre[2] == 0, "the bar was tinted by the look")
+        #expect(Int(centre[0]) + Int(centre[1]) + Int(centre[2]) > 24,
+                "the chromatic censor regressed to an opaque black bar")
     }
 
     /// A mosaic is applied before grading, so the censored patch is graded with the rest of the
@@ -298,5 +333,46 @@ struct CameraLookParityTests {
         // preview a film preset shows it as noise.
         let chip = CameraFilmSimulation.grainCellSize(uprightHeight: ToneRenderer.thumbnailMaxDimension)
         #expect(chip > 1, "a thumbnail cannot resolve its own grain")
+    }
+
+    @Test("film density puts grain in midtones instead of white dots everywhere")
+    func grainFollowsFilmDensity() {
+        let filter = CameraFilter(
+            id: "test-grain",
+            title: .cameraKit("Original"),
+            tone: .neutral,
+            film: CameraFilmSimulation(grain: 1)
+        )
+        func rendered(_ value: CGFloat) -> CIImage {
+            CameraLookRenderer.render(
+                flat(CIColor(red: value, green: value, blue: value), size: CGSize(width: 256, height: 256)),
+                filter: filter,
+                beauty: .off,
+                grainSeed: 0.37
+            )
+        }
+
+        let shadow = lumaDeviation(rendered(0.01))
+        let midtone = lumaDeviation(rendered(0.50))
+        let highlight = lumaDeviation(rendered(0.98))
+        #expect(midtone > shadow * 4 + 0.5)
+        #expect(midtone > highlight * 4 + 0.5)
+    }
+
+    @Test("film stocks keep a neutral midtone open")
+    func filmProfilesDoNotCrushExposure() {
+        for filter in CameraFilter.filmPresets {
+            let rendered = CameraLookRenderer.render(
+                flat(CIColor(red: 0.5, green: 0.5, blue: 0.5), size: CGSize(width: 128, height: 128)),
+                filter: filter,
+                beauty: .off,
+                grainSeed: 0.37
+            )
+            let centre = pixel(rendered, x: 64, y: 64)
+            let luma = Double(centre[0]) * 0.2126
+                + Double(centre[1]) * 0.7152
+                + Double(centre[2]) * 0.0722
+            #expect(luma >= 118, "\(filter.id) darkened a neutral midtone too far: \(luma)")
+        }
     }
 }

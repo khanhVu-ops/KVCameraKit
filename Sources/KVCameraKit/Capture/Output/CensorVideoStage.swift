@@ -30,13 +30,47 @@ final class CensorVideoStage: @unchecked Sendable {
     /// Unmanaged, matching `ToneRenderer` and the shader: the effect operates on the same
     /// gamma-encoded values the preview does. Colour-managing here would make every recorded
     /// frame differ from the viewfinder it was composed in.
-    private let context = CIContext(options: [
+    /// Shared for the camera session instead of rebuilt per recording. Constructing a
+    /// `CIContext` creates a Metal command queue and its first render compiles the distortion
+    /// graph; doing either on the first recorded frame is the 1–2 second opening hitch this
+    /// stage must avoid.
+    nonisolated(unsafe) private static let context = CIContext(options: [
         .workingColorSpace: NSNull(),
         .useSoftwareRenderer: false
     ])
 
+    fileprivate struct WarmupRecipe: Hashable, Sendable {
+        let mode: CameraCensorMode
+        let faceEffect: CameraFaceEffect
+    }
+
+    private static let warmupCoordinator = CensorVideoWarmupCoordinator()
+
+    /// Compiles the selected Core Image graph before the writer accepts its first sample.
+    /// Calls for the same recipe coalesce, so selecting an effect and then immediately tapping
+    /// record waits for the existing warm-up rather than compiling it twice.
+    static func prepare(mode: CameraCensorMode, faceEffect: CameraFaceEffect) async {
+        guard mode.isEnabled || faceEffect.isEnabled else { return }
+        let recipe = WarmupRecipe(mode: mode, faceEffect: faceEffect)
+        await warmupCoordinator.prepare(recipe) {
+            performWarmup(recipe)
+        }
+    }
+
+    /// Starts preparation when a mode is selected. `CameraService.prepareRecordingEffects()`
+    /// still awaits the same task at record time, closing the race when the user taps record
+    /// immediately after choosing the effect.
+    static func schedulePreparation(mode: CameraCensorMode, faceEffect: CameraFaceEffect) {
+        guard mode.isEnabled || faceEffect.isEnabled else { return }
+        Task.detached(priority: .userInitiated) {
+            await prepare(mode: mode, faceEffect: faceEffect)
+        }
+    }
+
     /// Set once, before the recording starts.
     var mode: CameraCensorMode = .off
+    /// A playful warp can compose with a censor and uses the same face regions.
+    var faceEffect: CameraFaceEffect = .off
     /// Read per frame — the geometry is produced on the detector's queue and this is called on
     /// the writer's, so the newest value is the only correct one to use.
     var regions: (@Sendable () -> [CensorRegion])?
@@ -54,7 +88,7 @@ final class CensorVideoStage: @unchecked Sendable {
     /// dropping the frame. A dropped frame is a recording that plays fast, and a censor that
     /// silently drops frames when it fails is worse than one that visibly does nothing.
     func process(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer {
-        guard mode.isEnabled,
+        guard (mode.isEnabled || faceEffect.isEnabled),
               let faces = regions?(), !faces.isEmpty,
               let source = CMSampleBufferGetImageBuffer(sampleBuffer)
         else { return sampleBuffer }
@@ -70,8 +104,9 @@ final class CensorVideoStage: @unchecked Sendable {
               let destination else { return sampleBuffer }
 
         let image = CIImage(cvPixelBuffer: source)
-        let censored = CensorRenderer.render(image: image, mode: mode, regions: faces)
-        context.render(
+        let warped = FaceEffectRenderer.render(image: image, effect: faceEffect, regions: faces)
+        let censored = CensorRenderer.render(image: warped, mode: mode, regions: faces)
+        Self.context.render(
             censored,
             to: destination,
             bounds: image.extent,
@@ -176,5 +211,82 @@ final class CensorVideoStage: @unchecked Sendable {
         ) == noErr else { return nil }
         outputFormat = created
         return created
+    }
+
+    /// A tiny procedural frame is sufficient to force Core Image/Metal kernel compilation.
+    /// It deliberately exercises the real face graph, but not at camera resolution: shader
+    /// compilation is resolution-independent, while shading a throwaway 4K warm-up would only
+    /// move the hitch rather than remove it.
+    private static func performWarmup(_ recipe: WarmupRecipe) {
+        let dimension = 192
+        let scalarDimension = CGFloat(dimension)
+        let extent = CGRect(x: 0, y: 0, width: scalarDimension, height: scalarDimension)
+        let source = (CIFilter(name: "CICheckerboardGenerator", parameters: [
+            "inputCenter": CIVector(x: scalarDimension / 2, y: scalarDimension / 2),
+            "inputColor0": CIColor(red: 0.92, green: 0.34, blue: 0.18),
+            "inputColor1": CIColor(red: 0.10, green: 0.42, blue: 0.88),
+            "inputWidth": 12
+        ])?.outputImage ?? CIImage(color: .gray)).cropped(to: extent)
+        let region = CensorRegion(
+            id: 0,
+            center: CGPoint(x: 0.5, y: 0.5),
+            radius: CGSize(width: 0.27, height: 0.34),
+            roll: 0.12
+        )
+        let warped = FaceEffectRenderer.render(
+            image: source,
+            effect: recipe.faceEffect,
+            regions: [region]
+        )
+        let rendered = CensorRenderer.render(
+            image: warped,
+            mode: recipe.mode,
+            regions: [region]
+        )
+
+        // Simulator fixtures are BGRA, while devices normally deliver one of the two
+        // bi-planar YUV ranges. Warm every destination family at a tiny size so the device's
+        // first real frame does not discover an uncompiled colour-conversion pipeline.
+        let formats: [OSType] = [
+            kCVPixelFormatType_32BGRA,
+            kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+            kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        ]
+        for format in formats {
+            var destination: CVPixelBuffer?
+            guard CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                dimension,
+                dimension,
+                format,
+                [kCVPixelBufferIOSurfacePropertiesKey as String: [:]] as CFDictionary,
+                &destination
+            ) == kCVReturnSuccess, let destination else { continue }
+            context.render(rendered, to: destination, bounds: extent, colorSpace: nil)
+        }
+    }
+}
+
+/// One task per selected recipe. An actor keeps selection-time preparation and record-time
+/// waiting race-free without putting a lock around Core Image rendering.
+private actor CensorVideoWarmupCoordinator {
+    private var completed: Set<CensorVideoStage.WarmupRecipe> = []
+    private var inFlight: [CensorVideoStage.WarmupRecipe: Task<Void, Never>] = [:]
+
+    func prepare(
+        _ recipe: CensorVideoStage.WarmupRecipe,
+        work: @escaping @Sendable () -> Void
+    ) async {
+        if completed.contains(recipe) { return }
+        if let task = inFlight[recipe] {
+            await task.value
+            return
+        }
+
+        let task = Task.detached(priority: .userInitiated) { work() }
+        inFlight[recipe] = task
+        await task.value
+        inFlight[recipe] = nil
+        completed.insert(recipe)
     }
 }

@@ -30,6 +30,7 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     private let displayPipeline: MTLRenderPipelineState
     private let lutTextureLoader: CameraLUTTextureLoader
     private var lutTexture: MTLTexture
+    private let grainTexture: MTLTexture
 
     /// Where the look pass writes and the display pass reads.
     ///
@@ -204,6 +205,10 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         didSet { if censorMode != oldValue { configRevision &+= 1 } }
     }
 
+    var faceEffect: CameraFaceEffect = .off {
+        didSet { if faceEffect != oldValue { configRevision &+= 1 } }
+    }
+
     /// Where the face geometry comes from, asked **once per drawn frame**.
     ///
     /// A closure rather than a stored array, and that is not a style choice. The regions are
@@ -234,7 +239,7 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     struct CensorHeaderUniform {
         var imageSize: SIMD2<Float> = .zero
         var count: Int32 = 0
-        var unused: Int32 = 0
+        var faceEffect: Int32 = 0
     }
 
     /// The uniforms for one frame.
@@ -245,16 +250,18 @@ final class CameraPreviewRenderer: @unchecked Sendable {
     /// rather than no buffer at all.
     static func censorUniforms(
         mode: CameraCensorMode,
+        faceEffect: CameraFaceEffect = .off,
         regions: [CensorRegion],
         sourceSize: CGSize
     ) -> (header: CensorHeaderUniform, ellipses: [CensorEllipseUniform]) {
         var ellipses = [CensorEllipseUniform](repeating: CensorEllipseUniform(), count: CensorTracker.maximumRegions)
         var header = CensorHeaderUniform(
             imageSize: SIMD2<Float>(Float(sourceSize.width), Float(sourceSize.height)),
-            count: 0
+            count: 0,
+            faceEffect: Int32(faceEffect.shaderCode)
         )
 
-        guard mode.isEnabled else { return (header, ellipses) }
+        guard mode.isEnabled || faceEffect.isEnabled else { return (header, ellipses) }
 
         for (index, region) in regions.prefix(CensorTracker.maximumRegions).enumerated() {
             ellipses[index] = CensorEllipseUniform(
@@ -272,7 +279,8 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         guard let device = MTLCreateSystemDefaultDevice(),
               let commandQueue = device.makeCommandQueue() else { return nil }
         let lutTextureLoader = CameraLUTTextureLoader(device: device)
-        guard let lutTexture = lutTextureLoader.texture(for: nil) else { return nil }
+        guard let lutTexture = lutTextureLoader.texture(for: nil),
+              let grainTexture = Self.makeGrainTexture(device: device) else { return nil }
 
         // The `.metal` file is compiled by SwiftPM into the package's own bundle, so the
         // default library of `Bundle.main` is the wrong place to look — that is the host app.
@@ -283,17 +291,17 @@ final class CameraPreviewRenderer: @unchecked Sendable {
               let displayFunction = library.makeFunction(name: "cameraDisplayFragment")
         else { return nil }
 
-        func pipeline(fragment: MTLFunction) -> MTLRenderPipelineState? {
+        func pipeline(fragment: MTLFunction, pixelFormat: MTLPixelFormat) -> MTLRenderPipelineState? {
             let descriptor = MTLRenderPipelineDescriptor()
             descriptor.vertexFunction = vertexFunction
             descriptor.fragmentFunction = fragment
-            descriptor.colorAttachments[0].pixelFormat = Self.lookPixelFormat
+            descriptor.colorAttachments[0].pixelFormat = pixelFormat
             return try? device.makeRenderPipelineState(descriptor: descriptor)
         }
 
-        guard let bgraPipeline = pipeline(fragment: bgraFunction),
-              let ycbcrPipeline = pipeline(fragment: ycbcrFunction),
-              let displayPipeline = pipeline(fragment: displayFunction) else { return nil }
+        guard let bgraPipeline = pipeline(fragment: bgraFunction, pixelFormat: Self.lookPixelFormat),
+              let ycbcrPipeline = pipeline(fragment: ycbcrFunction, pixelFormat: Self.lookPixelFormat),
+              let displayPipeline = pipeline(fragment: displayFunction, pixelFormat: .bgra8Unorm) else { return nil }
 
         var cache: CVMetalTextureCache?
         guard CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cache) == kCVReturnSuccess,
@@ -306,7 +314,33 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         self.displayPipeline = displayPipeline
         self.lutTextureLoader = lutTextureLoader
         self.lutTexture = lutTexture
+        self.grainTexture = grainTexture
         self.textureCache = textureCache
+    }
+
+    /// Uploads the one emulsion field used by Core Image, byte for byte.
+    private static func makeGrainTexture(device: MTLDevice) -> MTLTexture? {
+        let dimension = CameraFilmSimulation.grainTileDimension
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm,
+            width: dimension,
+            height: dimension,
+            mipmapped: false
+        )
+        descriptor.usage = .shaderRead
+        descriptor.storageMode = .shared
+        guard let texture = device.makeTexture(descriptor: descriptor) else { return nil }
+        CameraFilmSimulation.grainTileBytes.withUnsafeBytes { bytes in
+            guard let address = bytes.baseAddress else { return }
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, dimension, dimension),
+                mipmapLevel: 0,
+                withBytes: address,
+                bytesPerRow: dimension
+            )
+        }
+        texture.label = "KVCameraKit shared film emulsion"
+        return texture
     }
 
     // MARK: - Frame intake
@@ -418,10 +452,10 @@ final class CameraPreviewRenderer: @unchecked Sendable {
 
     /// The pixel format both passes render into.
     ///
-    /// Eight bits, matching the drawable and the sensor's own depth. A wider intermediate would
-    /// buy precision the source never had, and cost twice the bandwidth on the one texture that
-    /// is written and read every frame.
-    static let lookPixelFormat: MTLPixelFormat = .bgra8Unorm
+    /// Film grain is deliberately subtler than one 8-bit code value for fine-grain stocks.
+    /// Keeping the look pass in half-float preserves that modulation until the final display
+    /// conversion; writing it straight into BGRA8 quantised Portra's texture back out.
+    static let lookPixelFormat: MTLPixelFormat = .rgba16Float
 
     /// Called by the display link, which runs faster than the camera and does not stop when
     /// the camera does.
@@ -555,7 +589,8 @@ final class CameraPreviewRenderer: @unchecked Sendable {
         // the picture for free.
         var censor = Self.censorUniforms(
             mode: censorMode,
-            regions: censorMode.isEnabled ? (censorRegions?() ?? []) : [],
+            faceEffect: faceEffect,
+            regions: (censorMode.isEnabled || faceEffect.isEnabled) ? (censorRegions?() ?? []) : [],
             sourceSize: frame.sourceSize
         )
         let ellipseStride = MemoryLayout<CensorEllipseUniform>.stride * censor.ellipses.count
@@ -565,6 +600,7 @@ final class CameraPreviewRenderer: @unchecked Sendable {
             encoder.setRenderPipelineState(bgraLookPipeline)
             encoder.setFragmentTexture(frame.textures[0], index: 0)
             encoder.setFragmentTexture(lutTexture, index: 1)
+            encoder.setFragmentTexture(grainTexture, index: 2)
             encoder.setFragmentBytes(&tone, length: MemoryLayout<simd_float4x4>.size, index: 0)
             encoder.setFragmentBytes(&frameLook, length: MemoryLayout<LookUniform>.stride, index: 1)
             encoder.setFragmentBytes(&censor.header, length: MemoryLayout<CensorHeaderUniform>.stride, index: 2)
@@ -575,6 +611,7 @@ final class CameraPreviewRenderer: @unchecked Sendable {
             encoder.setFragmentTexture(frame.textures[0], index: 0)
             encoder.setFragmentTexture(frame.textures[1], index: 1)
             encoder.setFragmentTexture(lutTexture, index: 2)
+            encoder.setFragmentTexture(grainTexture, index: 3)
             var conversion = Self.ycbcrToRGB(isFullRange: isFullRange, standard: standard)
             var offset = Self.ycbcrOffset(isFullRange: isFullRange)
             encoder.setFragmentBytes(&conversion, length: MemoryLayout<simd_float3x3>.size, index: 0)

@@ -16,12 +16,14 @@ struct CameraLookStage: Identifiable, Equatable, Sendable {
     enum Kind: String, Equatable, Sendable {
         case filter
         case beauty
+        case faceEffect
         case censor
 
         var systemIconName: String {
             switch self {
             case .filter: return "camera.filters"
             case .beauty: return "sparkles"
+            case .faceEffect: return "face.dashed"
             case .censor: return "eye.slash.fill"
             }
         }

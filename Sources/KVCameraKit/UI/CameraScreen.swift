@@ -59,6 +59,7 @@ public struct CameraScreen: View {
             onCloseShelf: { viewModel.send(.closeShelf) },
             onSelectFilter: { viewModel.send(.setFilter($0)) },
             onSetBeauty: { viewModel.send(.setBeauty($0)) },
+            onSelectFaceEffect: { viewModel.send(.setFaceEffect($0)) },
             onSelectCensorMode: { viewModel.send(.setCensorMode($0)) },
             onResetLook: { viewModel.send(.resetLook) },
             onTapToFocus: { devPoint, viewPoint, locked in
@@ -125,6 +126,7 @@ struct CameraContentView: View {
     let onCloseShelf: () -> Void
     let onSelectFilter: (CameraFilter) -> Void
     let onSetBeauty: (CameraBeauty) -> Void
+    let onSelectFaceEffect: (CameraFaceEffect) -> Void
     let onSelectCensorMode: (CameraCensorMode) -> Void
     let onResetLook: () -> Void
     let onTapToFocus: (CGPoint, CGPoint, Bool) -> Void
@@ -197,6 +199,7 @@ struct CameraContentView: View {
                                 filter: state.filter,
                                 beauty: state.beauty,
                                 censorMode: state.censorMode,
+                                faceEffect: state.faceEffect,
                                 // A closure, not the array: the geometry updates on the
                                 // detector's queue and the viewfinder draws at 60 Hz, while
                                 // `updateUIView` runs only when something in `CameraState`
@@ -844,6 +847,7 @@ struct CameraContentView: View {
                     filters: CameraFilter.all,
                     selectedFilterID: state.filter.id,
                     beauty: state.beauty,
+                    faceEffect: state.faceEffect,
                     censorMode: state.censorMode,
                     stages: state.activeLookStages,
                     tab: tab,
@@ -853,6 +857,7 @@ struct CameraContentView: View {
                     onSelectTab: onSelectShelfTab,
                     onSelectFilter: onSelectFilter,
                     onBeautyChange: onSetBeauty,
+                    onSelectFaceEffect: onSelectFaceEffect,
                     onSelectCensorMode: onSelectCensorMode,
                     onReset: onResetLook,
                     onClose: onCloseShelf
@@ -1187,6 +1192,7 @@ struct CameraContentView: View {
         onCloseShelf: {},
         onSelectFilter: { _ in },
         onSetBeauty: { _ in },
+        onSelectFaceEffect: { _ in },
         onSelectCensorMode: { _ in },
         onResetLook: {},
         onTapToFocus: { _, _, _ in },
@@ -1224,6 +1230,7 @@ struct CameraContentView: View {
         onCloseShelf: {},
         onSelectFilter: { _ in },
         onSetBeauty: { _ in },
+        onSelectFaceEffect: { _ in },
         onSelectCensorMode: { _ in },
         onResetLook: {},
         onTapToFocus: { _, _, _ in },

@@ -22,6 +22,8 @@ struct MetalCameraPreviewView: UIViewRepresentable {
     /// The censor look. The geometry it applies to arrives separately, and for a different
     /// reason — see `censorRegions`.
     let censorMode: CameraCensorMode
+    /// A non-privacy face warp that shares the same tracked geometry.
+    let faceEffect: CameraFaceEffect
     /// The live face geometry, read once per drawn frame.
     ///
     /// A closure rather than a value, because a value here would be wrong most of the time.
@@ -84,6 +86,7 @@ struct MetalCameraPreviewView: UIViewRepresentable {
         context.coordinator.renderer?.isMirrored = isMirrored
         context.coordinator.renderer?.configure(filter: filter, beauty: beauty)
         context.coordinator.renderer?.censorMode = censorMode
+        context.coordinator.renderer?.faceEffect = faceEffect
         context.coordinator.renderer?.censorRegions = censorRegions
         context.coordinator.onTapToFocus = onTapToFocus
     }

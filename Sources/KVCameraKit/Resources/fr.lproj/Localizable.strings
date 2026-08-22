@@ -50,9 +50,15 @@
    name every stage that is currently changing the picture. */
 "Mosaic" = "Mosaïque";
 "Blur" = "Flou";
-"Censor Bar" = "Bandeau noir";
 "Privacy" = "Confidentialité";
 "No look applied" = "Aucun rendu appliqué";
 "Reset look" = "Réinitialiser le rendu";
 "Faces are covered in the photo and the video, not just on screen" = "Les visages sont masqués dans la photo et la vidéo, pas seulement à l'écran";
 "Face censoring is unavailable in this build" = "Le masquage des visages n'est pas disponible dans cette version";
+
+/* Face effects and the chromatic privacy censor. */
+"Censor" = "Censure";
+"Face FX" = "Effets visage";
+"Big Eyes" = "Grands yeux";
+"Slim Face" = "Visage affiné";
+"Funhouse" = "Miroir déformant";

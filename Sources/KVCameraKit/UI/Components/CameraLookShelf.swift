@@ -26,6 +26,7 @@ struct CameraLookShelf: View {
     let filters: [CameraFilter]
     let selectedFilterID: String
     let beauty: CameraBeauty
+    let faceEffect: CameraFaceEffect
     let censorMode: CameraCensorMode
     let stages: [CameraLookStage]
     let tab: CameraLookShelfTab
@@ -39,6 +40,7 @@ struct CameraLookShelf: View {
     let onSelectTab: (CameraLookShelfTab) -> Void
     let onSelectFilter: (CameraFilter) -> Void
     let onBeautyChange: (CameraBeauty) -> Void
+    let onSelectFaceEffect: (CameraFaceEffect) -> Void
     let onSelectCensorMode: (CameraCensorMode) -> Void
     let onReset: () -> Void
     let onClose: () -> Void
@@ -154,6 +156,8 @@ struct CameraLookShelf: View {
             return CameraLookShelfTab(category: activeFilter?.category ?? .styles)
         case .beauty:
             return .beauty
+        case .faceEffect:
+            return .faceFX
         case .censor:
             return .privacy
         }
@@ -212,6 +216,8 @@ struct CameraLookShelf: View {
             return activeFilter?.category == item.category
         case .beauty:
             return beauty.isEnabled
+        case .faceFX:
+            return faceEffect.isEnabled
         case .privacy:
             return censorMode.isEnabled
         }
@@ -226,6 +232,8 @@ struct CameraLookShelf: View {
             chipCarousel
         case .beauty:
             beautyControls
+        case .faceFX:
+            faceEffectControls
         case .privacy:
             privacyControls
         }
@@ -363,6 +371,39 @@ struct CameraLookShelf: View {
                     .monospacedDigit()
                     .foregroundStyle(Color.white.opacity(0.8))
                     .frame(width: 34, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 14)
+    }
+
+    // MARK: - Privacy
+
+    private var faceEffectControls: some View {
+        HStack(spacing: 6) {
+            ForEach(CameraFaceEffect.allCases, id: \.self) { effect in
+                let isSelected = effect == faceEffect
+                Button {
+                    CameraHaptic.selection.play()
+                    onSelectFaceEffect(effect)
+                } label: {
+                    VStack(spacing: 5) {
+                        Image(systemName: effect.systemIconName)
+                            .font(.system(size: 16, weight: isSelected ? .bold : .medium))
+                        Text(effect.title)
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.68)
+                    }
+                    .foregroundStyle(isSelected ? Color.black : Color.white.opacity(0.8))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(
+                        isSelected ? Color.yellow : Color.white.opacity(0.08),
+                        in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(!canCensor)
             }
         }
         .padding(.horizontal, 14)
@@ -533,6 +574,7 @@ private func previewShelf(
     tab: CameraLookShelfTab,
     filter: CameraFilter = .portra400,
     beauty: CameraBeauty = .off,
+    faceEffect: CameraFaceEffect = .off,
     censorMode: CameraCensorMode = .off,
     canCensor: Bool = true
 ) -> some View {
@@ -543,6 +585,9 @@ private func previewShelf(
     if beauty.isEnabled {
         stages.append(CameraLookStage(kind: .beauty, title: CameraLookShelfTab.beauty.title))
     }
+    if faceEffect.isEnabled {
+        stages.append(CameraLookStage(kind: .faceEffect, title: faceEffect.title))
+    }
     if censorMode.isEnabled {
         stages.append(CameraLookStage(kind: .censor, title: censorMode.title))
     }
@@ -551,6 +596,7 @@ private func previewShelf(
         filters: CameraFilter.all,
         selectedFilterID: filter.id,
         beauty: beauty,
+        faceEffect: faceEffect,
         censorMode: censorMode,
         stages: stages,
         tab: tab,
@@ -560,6 +606,7 @@ private func previewShelf(
         onSelectTab: { _ in },
         onSelectFilter: { _ in },
         onBeautyChange: { _ in },
+        onSelectFaceEffect: { _ in },
         onSelectCensorMode: { _ in },
         onReset: {},
         onClose: {}

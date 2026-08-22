@@ -50,6 +50,12 @@ struct CameraCensorTests {
         #expect(CameraCensorMode.mosaic.shaderCode == 1)
         #expect(CameraCensorMode.blur.shaderCode == 2)
         #expect(CameraCensorMode.censorBar.shaderCode == 3)
+
+        #expect(CameraFaceEffect.allCases.count == 4)
+        #expect(CameraFaceEffect.off.shaderCode == 0)
+        #expect(CameraFaceEffect.bigEyes.shaderCode == 1)
+        #expect(CameraFaceEffect.slimFace.shaderCode == 2)
+        #expect(CameraFaceEffect.funhouse.shaderCode == 3)
     }
 
     // MARK: - Orientation
@@ -100,22 +106,22 @@ struct CameraCensorTests {
 
         #expect(region.id == 7)
         expectClose(region.center.x, 0.5)
-        // 1 - 0.65 flips into y-down, then the bias moves it *up* by 11% of the box height.
-        // 0.35 - 0.011. A centre of 0.361 here would be the same arithmetic with the sign of
+        // 1 - 0.65 flips into y-down, then the bias moves it *up* by 14% of the box height.
+        // 0.35 - 0.014. A centre below the original box is the same arithmetic with the sign of
         // the bias wrong, which covers the neck and leaves the hair.
-        expectClose(region.center.y, 0.339)
+        expectClose(region.center.y, 0.336)
         #expect(region.center.y < 0.35)
 
-        // 0.2 * 1.36 / 2
-        expectClose(region.radius.width, 0.136)
-        // 0.1 * 1.62 * (1920/1080) / 2 — the vertical fraction rescaled into width units,
+        // 0.2 * 1.52 / 2
+        expectClose(region.radius.width, 0.152)
+        // 0.1 * 1.78 * (1920/1080) / 2 — the vertical fraction rescaled into width units,
         // which is what keeps the space isotropic and the roll rigid.
-        expectClose(region.radius.height, 0.144)
+        expectClose(region.radius.height, 0.158222)
 
         // In pixels the two semi-axes are 146.9 and 155.5: taller than wide, which is the
         // shape of a head. A radius that came out 16:9-stretched would be the aspect bug.
-        expectClose(region.radius.width * upright.width, 146.88, 0.01)
-        expectClose(region.radius.height * upright.width, 155.52, 0.01)
+        expectClose(region.radius.width * upright.width, 164.16, 0.01)
+        expectClose(region.radius.height * upright.width, 170.88, 0.01)
     }
 
     @Test("Vision's roll is negated, because Vision's y runs the other way")
@@ -158,8 +164,8 @@ struct CameraCensorTests {
     func rotationRadii() {
         let region = CensorRegion(
             id: 1,
-            center: CGPoint(x: 0.5, y: 0.339),
-            radius: CGSize(width: 0.136, height: 0.144),
+            center: CGPoint(x: 0.5, y: 0.336),
+            radius: CGSize(width: 0.152, height: 0.158222),
             roll: 0
         )
         let mapped = CensorGeometry.sensorRegion(
@@ -169,12 +175,12 @@ struct CameraCensorTests {
         )
 
         // A rotation is rigid in pixels, so the two semi-axes are the same lengths as before —
-        // 146.88 and 155.52 — with the axes exchanged. Normalised against the width, which for
+        // 164.16 and 170.88 — with the axes exchanged. Normalised against the width, which for
         // a quarter turn is a different width, they are 0.5625x their upright values.
-        expectClose(mapped.radius.width, 0.081)
-        expectClose(mapped.radius.height, 0.0765)
-        expectClose(mapped.radius.width * sensor.width, 155.52, 0.02)
-        expectClose(mapped.radius.height * sensor.width, 146.88, 0.02)
+        expectClose(mapped.radius.width, 0.089)
+        expectClose(mapped.radius.height, 0.0855)
+        expectClose(mapped.radius.width * sensor.width, 170.88, 0.02)
+        expectClose(mapped.radius.height * sensor.width, 164.16, 0.02)
         // Pixel lengths preserved: the same face, described in the other space.
         expectClose(mapped.radius.width * sensor.width, region.radius.height * upright.width, 0.02)
 
@@ -217,10 +223,10 @@ struct CameraCensorTests {
         )
 
         #expect(region.id == 3)
-        expectClose(region.center.x, 0.339)
+        expectClose(region.center.x, 0.336)
         expectClose(region.center.y, 0.5)
-        expectClose(region.radius.width, 0.081)
-        expectClose(region.radius.height, 0.0765)
+        expectClose(region.radius.width, 0.089)
+        expectClose(region.radius.height, 0.0855)
 
         // Vision saw the face in the upper half of the portrait picture (y-up 0.65), so in the
         // landscape buffer it is towards the left. Held in portrait, "towards the top of the
@@ -238,8 +244,8 @@ struct CameraCensorTests {
             rotationDegrees: 0
         )
         expectClose(region.center.x, 0.5)
-        // 1 - 0.5 - 0.2 * 0.11
-        expectClose(region.center.y, 0.478)
+        // 1 - 0.5 - 0.2 * 0.14
+        expectClose(region.center.y, 0.472)
         expectClose(region.roll, -0.2)
     }
 
@@ -299,6 +305,7 @@ struct CameraCensorTests {
         )
 
         #expect(packed.header.count == 2)
+        #expect(packed.header.faceEffect == 0)
         #expect(packed.header.imageSize == SIMD2<Float>(1920, 1080))
         // Always full length: `setFragmentBytes` rejects a zero length, so an empty frame is a
         // count of zero beside unused slots rather than no buffer.
@@ -326,6 +333,19 @@ struct CameraCensorTests {
             sourceSize: sensor
         )
         #expect(packed.header.count == 0)
+    }
+
+    @Test("A face effect packs tracked regions even when privacy is off")
+    func faceEffectUniforms() {
+        let packed = CameraPreviewRenderer.censorUniforms(
+            mode: .off,
+            faceEffect: .bigEyes,
+            regions: [CensorRegion(id: 1, center: CGPoint(x: 0.5, y: 0.5), radius: CGSize(width: 0.1, height: 0.1), roll: 0)],
+            sourceSize: sensor
+        )
+        #expect(packed.header.count == 1)
+        #expect(packed.header.faceEffect == 1)
+        #expect(packed.ellipses[0].mode == 0)
     }
 
     @Test("More faces than slots keeps the biggest")

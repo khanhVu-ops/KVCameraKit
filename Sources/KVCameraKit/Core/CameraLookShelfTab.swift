@@ -16,6 +16,8 @@ public enum CameraLookShelfTab: String, CaseIterable, Identifiable, Equatable, S
     case film
     case lut
     case beauty
+    /// Playful face deformation. Separate from Privacy because it does not anonymize anyone.
+    case faceFX
     /// Face censoring. Grouped with the looks rather than kept apart because it is the same kind
     /// of decision — something applied to every pixel on the way out — and because keeping it
     /// apart is what produced two competing shelves.
@@ -29,14 +31,14 @@ public enum CameraLookShelfTab: String, CaseIterable, Identifiable, Equatable, S
         case .styles:   return .styles
         case .film:     return .film
         case .lut:      return .lut
-        case .beauty, .privacy: return nil
+        case .beauty, .faceFX, .privacy: return nil
         }
     }
 
     /// Whether opening this tab needs `CameraMode.supportsFilters` and a preview that can draw a
     /// look. Privacy does not: the censor runs in the same pipeline but is not a *look*, and it is
     /// gated on `CameraService.isCensorSupported` instead.
-    var needsLookSupport: Bool { self != .privacy }
+    var needsLookSupport: Bool { self != .privacy && self != .faceFX }
 
     var title: LocalizedStringResource {
         switch self {
@@ -44,6 +46,7 @@ public enum CameraLookShelfTab: String, CaseIterable, Identifiable, Equatable, S
         case .film:     return .cameraKit("Film")
         case .lut:      return .cameraKit("LUT")
         case .beauty:   return .cameraKit("Beauty")
+        case .faceFX:   return .cameraKit("Face FX")
         case .privacy:  return .cameraKit("Privacy")
         }
     }
@@ -54,6 +57,7 @@ public enum CameraLookShelfTab: String, CaseIterable, Identifiable, Equatable, S
         case .film:     return "film"
         case .lut:      return "swatchpalette"
         case .beauty:   return "sparkles"
+        case .faceFX:   return "face.dashed"
         case .privacy:  return "eye.slash"
         }
     }

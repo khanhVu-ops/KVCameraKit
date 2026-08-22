@@ -37,23 +37,23 @@ final class CensorTracker: @unchecked Sendable {
     ///
     /// Long enough to cover a blink and a turn of the head, short enough that a face that has
     /// genuinely left the frame stops being censored before the empty space is noticeable.
-    private static let coastDuration: TimeInterval = 0.55
+    private static let coastDuration: TimeInterval = 0.70
     /// How much a coasting region grows, at the end of the coast. It grows because a track is
     /// usually lost *because* the subject moved, so the last known position is the least
     /// trustworthy thing about it.
-    private static let coastGrowth: CGFloat = 1.28
+    private static let coastGrowth: CGFloat = 1.38
     /// The shader carries a fixed-size uniform array; this is its length. Beyond this the
     /// largest faces win, which is also the order in which they are recognisable.
     static let maximumRegions = 8
 
     /// Smoothing weight for a new observation. Position is fast, size and roll are slow.
-    private static let centerWeight: CGFloat = 0.55
+    private static let centerWeight: CGFloat = 0.82
     private static let radiusWeight: CGFloat = 0.22
     private static let rollWeight: CGFloat = 0.18
     /// Past this distance — as a multiple of the region's own radius — a new observation is
     /// taken whole instead of blended. Smoothing a fast movement is indistinguishable from
     /// lagging behind it.
-    private static let snapDistance: CGFloat = 0.9
+    private static let snapDistance: CGFloat = 0.62
 
     private let request: VNDetectFaceRectanglesRequest
     private let detectQueue = DispatchQueue(

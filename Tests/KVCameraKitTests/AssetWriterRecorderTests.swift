@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreMedia
+import UIKit
 import XCTest
 @testable import KVCameraKit
 
@@ -26,6 +27,30 @@ final class AssetWriterRecorderTests: XCTestCase {
         XCTAssertFalse(CameraRecordingEngine.movieFile.streamsToHost)
         XCTAssertFalse(CameraRecordingEngine.assetWriter.streamsToHost)
         XCTAssertTrue(CameraRecordingEngine.streamingAssetWriter.streamsToHost)
+    }
+
+    func test_filePosterTimeSkipsTheOpeningFrameAndClampsShortClips() {
+        XCTAssertEqual(VideoPosterSelection.preferredTime(for: 8).seconds, 0.5, accuracy: 0.001)
+        XCTAssertEqual(VideoPosterSelection.preferredTime(for: 0.4).seconds, 0.2, accuracy: 0.001)
+        XCTAssertEqual(VideoPosterSelection.preferredTime(for: nil).seconds, 0.5, accuracy: 0.001)
+    }
+
+    /// A slow GPU frame must not let 30 sensor buffers accumulate behind it. The slot keeps
+    /// only the freshest waiting frame and asks for exactly one follow-up drain turn.
+    func test_latestFrameSlotCoalescesARealTimeBacklog() {
+        let slot = LatestFrameSlot<Int>()
+
+        XCTAssertTrue(slot.submit(1), "the first value schedules the drain")
+        XCTAssertFalse(slot.submit(2), "a scheduled drain must not be scheduled twice")
+        XCTAssertEqual(slot.take(), 2, "the stale first value is replaced before processing")
+
+        XCTAssertFalse(slot.submit(3), "the current drain turn still owns scheduling")
+        XCTAssertFalse(slot.submit(4))
+        XCTAssertTrue(slot.finishTurn(), "the newest pending value needs one more turn")
+        XCTAssertEqual(slot.take(), 4)
+        XCTAssertFalse(slot.finishTurn(), "an empty slot releases the scheduling token")
+
+        XCTAssertTrue(slot.submit(5), "a later recording can schedule again")
     }
 
     // MARK: - stop()
@@ -218,6 +243,30 @@ final class AssetWriterRecorderTests: XCTestCase {
         XCTAssertNotNil(summary.posterData, "no poster means no thumbnail for the library")
     }
 
+    func test_streamingPosterUsesASettledFrameInsteadOfTheOpeningFrame() async throws {
+        let recorder = AssetWriterRecorder()
+        recorder.startStreaming(rotationDegrees: 0, includesAudio: false) { _ in }
+
+        for index in 0..<24 {
+            // BGRA in little-endian memory: red during startup, blue from 0.5 s onward.
+            let pixel: UInt32 = index < 15 ? 0xFFFF0000 : 0xFF0000FF
+            recorder.appendVideo(CameraFrame(
+                sampleBuffer: try Self.videoSample(index: Int64(index), pixel: pixel),
+                rotationAngle: 0
+            ))
+            try await Task.sleep(for: .milliseconds(25))
+        }
+
+        let stopped = await recorder.stop()
+        guard case .stream(let summary) = try XCTUnwrap(stopped) else {
+            return XCTFail("expected a streamed recording")
+        }
+        let poster = try XCTUnwrap(summary.posterData)
+        let color = try Self.averageRGBA(of: poster)
+
+        XCTAssertGreaterThan(color.blue, color.red + 40, "the red opening frame replaced the settled blue frame")
+    }
+
     /// A rotated recording reports rotated dimensions.
     ///
     /// The track stores its size pre-rotation, so a portrait clip measures landscape until the
@@ -348,7 +397,7 @@ final class AssetWriterRecorderTests: XCTestCase {
 
     /// A 640x480 frame. Larger than the 64x48 used elsewhere in these tests because a real
     /// encoder is involved here, and very small dimensions are not reliably encodable.
-    private static func videoSample(index: Int64) throws -> CMSampleBuffer {
+    private static func videoSample(index: Int64, pixel: UInt32? = nil) throws -> CMSampleBuffer {
         var pixelBuffer: CVPixelBuffer?
         XCTAssertEqual(
             CVPixelBufferCreate(
@@ -359,6 +408,23 @@ final class AssetWriterRecorderTests: XCTestCase {
             kCVReturnSuccess
         )
         let buffer = try XCTUnwrap(pixelBuffer)
+
+        if let pixel {
+            CVPixelBufferLockBaseAddress(buffer, [])
+            defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+            let width = CVPixelBufferGetWidth(buffer)
+            let height = CVPixelBufferGetHeight(buffer)
+            let wordsPerRow = CVPixelBufferGetBytesPerRow(buffer) / MemoryLayout<UInt32>.stride
+            if let baseAddress = CVPixelBufferGetBaseAddress(buffer) {
+                let words = baseAddress.bindMemory(to: UInt32.self, capacity: wordsPerRow * height)
+                for row in 0..<height {
+                    let start = row * wordsPerRow
+                    for column in 0..<width {
+                        words[start + column] = pixel
+                    }
+                }
+            }
+        }
 
         var formatDescription: CMFormatDescription?
         XCTAssertEqual(
@@ -389,6 +455,24 @@ final class AssetWriterRecorderTests: XCTestCase {
             noErr
         )
         return try XCTUnwrap(sampleBuffer)
+    }
+
+    private static func averageRGBA(of data: Data) throws -> (red: Int, green: Int, blue: Int, alpha: Int) {
+        let image = try XCTUnwrap(UIImage(data: data)?.cgImage)
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let context = try XCTUnwrap(CGContext(
+            data: &pixel,
+            width: 1,
+            height: 1,
+            bitsPerComponent: 8,
+            bytesPerRow: 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        context.interpolationQuality = .low
+        context.draw(image, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        return (Int(pixel[0]), Int(pixel[1]), Int(pixel[2]), Int(pixel[3]))
     }
 
     /// One buffer of silence, which is enough to prove it was ignored.

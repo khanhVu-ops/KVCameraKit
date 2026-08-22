@@ -50,9 +50,15 @@
    name every stage that is currently changing the picture. */
 "Mosaic" = "Mosaic";
 "Blur" = "Làm mờ";
-"Censor Bar" = "Thanh che";
 "Privacy" = "Bảo mật";
 "No look applied" = "Chưa áp dụng hiệu ứng";
 "Reset look" = "Đặt lại hiệu ứng";
 "Faces are covered in the photo and the video, not just on screen" = "Khuôn mặt được che cả trong ảnh và video, không chỉ trên màn hình";
 "Face censoring is unavailable in this build" = "Bản dựng này không hỗ trợ che khuôn mặt";
+
+/* Face effects and the chromatic privacy censor. */
+"Censor" = "Kiểm duyệt";
+"Face FX" = "Hiệu ứng khuôn mặt";
+"Big Eyes" = "Mắt to";
+"Slim Face" = "Mặt thon";
+"Funhouse" = "Gương méo";

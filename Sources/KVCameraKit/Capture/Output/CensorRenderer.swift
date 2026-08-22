@@ -32,15 +32,13 @@ enum CensorRenderer {
     // viewfinder and the file is invisible in a diff and does not fail a build.
 
     /// Cells across the face, matching `kMosaicCells` in the shader.
-    static let mosaicCells: CGFloat = 9
+    static let mosaicCells: CGFloat = 7
     /// Blur radius as a fraction of the face's semi-axis. Proportional to the face, so the
     /// same look holds at every distance — the shader's tap grid is in the same units for the
     /// same reason.
-    static let blurFraction: CGFloat = 0.35
-    /// The bar, in the ellipse's own frame, matching `kBarHalfExtent`/`kBarCenterY`. The sign
-    /// of the centre is flipped because Core Image's y runs up.
-    static let barHalfExtent = CGSize(width: 1.02, height: 0.275)
-    static let barCenterY: CGFloat = 0.175
+    static let blurFraction: CGFloat = 0.52
+    /// RGB separation as a fraction of the face radius, matching the Metal displacement.
+    static let chromaticShiftFraction: CGFloat = 0.105
     /// Where the feather starts, matching the shader's `smoothstep(0.86, 1.0, …)`.
     static let featherStart: CGFloat = 0.86
 
@@ -76,21 +74,18 @@ enum CensorRenderer {
         mode: CameraCensorMode,
         regions: [CensorRegion]
     ) -> CIImage {
-        guard mode == .mosaic || mode == .blur else { return image }
+        guard mode.isEnabled else { return image }
         return reduce(image: image, mode: mode, regions: regions)
     }
 
-    /// The bar — an opaque object placed **on top of** the finished picture.
-    ///
-    /// After grading, so it is black. Before, a strong preset tinted it: Film Noir produced a
-    /// dark grey bar in the viewfinder and a black one in the file, from the same censor mode.
+    /// Retained as the second half of the renderer contract. The former black bar is now a
+    /// destructive chromatic displacement and therefore runs before grading with the other modes.
     static func renderBar(
         image: CIImage,
         mode: CameraCensorMode,
         regions: [CensorRegion]
     ) -> CIImage {
-        guard mode == .censorBar else { return image }
-        return reduce(image: image, mode: mode, regions: regions)
+        image
     }
 
     private static func reduce(
@@ -124,7 +119,7 @@ enum CensorRenderer {
         regions: [CensorRegion],
         extent: CGRect
     ) -> CIImage? {
-        guard mode == .mosaic || mode == .blur, !regions.isEmpty else { return nil }
+        guard mode.isEnabled, !regions.isEmpty else { return nil }
         guard extent.width > 1, extent.height > 1, !extent.isInfinite else { return nil }
 
         var mask: CIImage?
@@ -137,7 +132,10 @@ enum CensorRenderer {
                     translationX: ellipse.center.x + extent.minX,
                     y: ellipse.center.y + extent.minY
                 ))
-            let next = featheredMask(placement: placement, radius: radius)
+            let maskRadius = mode == .blur
+                ? CGSize(width: max(radius.width, radius.height), height: max(radius.width, radius.height))
+                : radius
+            let next = featheredMask(placement: placement, radius: maskRadius)
             // Lighten rather than add: two overlapping faces must not produce a mask brighter
             // than white, which would push the inverse below zero.
             mask = mask.map {
@@ -166,22 +164,13 @@ enum CensorRenderer {
         let placement = CGAffineTransform(rotationAngle: ellipse.roll)
             .concatenating(CGAffineTransform(translationX: center.x, y: center.y))
 
-        if mode == .censorBar {
-            let bar = CGRect(
-                x: -barHalfExtent.width * radius.width,
-                y: (barCenterY - barHalfExtent.height) * radius.height,
-                width: barHalfExtent.width * 2 * radius.width,
-                height: barHalfExtent.height * 2 * radius.height
-            )
-            return CIImage(color: .black)
-                .cropped(to: bar)
-                .transformed(by: placement)
-                .composited(over: image)
-                .cropped(to: extent)
-        }
-
+        // Blur is intentionally circular rather than a tall capsule. Use the larger face axis
+        // so the round mask remains conservative and never trades appearance for exposed jaw.
+        let maskRadius = mode == .blur
+            ? CGSize(width: max(radius.width, radius.height), height: max(radius.width, radius.height))
+            : radius
         let bounds = CensorGeometry
-            .bounds(center: center, radius: radius, roll: ellipse.roll)
+            .bounds(center: center, radius: maskRadius, roll: ellipse.roll)
             .intersection(extent)
         guard !bounds.isNull, bounds.width > 1, bounds.height > 1 else { return image }
 
@@ -193,7 +182,7 @@ enum CensorRenderer {
             // across a moving face instead of travelling with it, and derived the cell size
             // from the frame, so a distant face became two blocks and a close one stayed
             // readable.
-            let cell = max(2, radius.width * 2 / mosaicCells)
+            let cell = max(3, radius.width * 2 / mosaicCells)
             // Softened *before* the cells are cut, and this is not cosmetic. `CIPixellate`
             // point-samples: each cell takes the colour of one pixel at its centre rather than
             // the mean of the cell. On anything with fine detail that aliases — a striped
@@ -205,7 +194,7 @@ enum CensorRenderer {
             // The shader does the same thing by averaging a grid inside each cell; it cannot
             // pre-blur, having no second pass to do it in.
             effect = image.clampedToExtent()
-                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: cell / 3])
+                .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: cell * 0.48])
                 .applyingFilter("CIPixellate", parameters: [
                     kCIInputScaleKey: cell,
                     kCIInputCenterKey: CIVector(x: center.x, y: center.y)
@@ -219,20 +208,70 @@ enum CensorRenderer {
             // rather than the frame's.
             effect = image.clampedToExtent()
                 .applyingFilter("CIGaussianBlur", parameters: [
-                    kCIInputRadiusKey: max(2, radius.width * blurFraction)
+                    kCIInputRadiusKey: max(3, maskRadius.width * blurFraction)
                 ])
                 .cropped(to: bounds)
 
-        case .off, .censorBar:
+        case .censorBar:
+            // A warped, RGB-separated face destroys recognisable detail while inheriting the
+            // picture's colour. Unlike the old opaque rectangle, it still looks intentional
+            // when several faces overlap or a head is rolled.
+            let warped = image.clampedToExtent()
+                .applyingFilter("CIGaussianBlur", parameters: [
+                    kCIInputRadiusKey: max(3, radius.width * 0.12)
+                ])
+                .applyingFilter("CIBumpDistortion", parameters: [
+                kCIInputCenterKey: CIVector(cgPoint: center),
+                kCIInputRadiusKey: max(maskRadius.width, maskRadius.height),
+                kCIInputScaleKey: 0.58
+                ])
+            let shift = max(2, radius.width * chromaticShiftFraction)
+            let red = isolatedChannel(
+                warped.transformed(by: CGAffineTransform(translationX: shift, y: 0)),
+                red: true, green: false, blue: false
+            )
+            let green = isolatedChannel(warped, red: false, green: true, blue: false)
+            let blue = isolatedChannel(
+                warped.transformed(by: CGAffineTransform(translationX: -shift, y: 0)),
+                red: false, green: false, blue: true
+            )
+            effect = red
+                .applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: green])
+                .applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: blue])
+                .applyingFilter("CIColorMatrix", parameters: [
+                    "inputRVector": CIVector(x: 1, y: 0, z: 0, w: 0),
+                    "inputGVector": CIVector(x: 0, y: 1, z: 0, w: 0),
+                    "inputBVector": CIVector(x: 0, y: 0, z: 1, w: 0),
+                    "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1),
+                    "inputBiasVector": CIVector(x: 0.075, y: -0.018, z: 0.105, w: 0)
+                ])
+                .cropped(to: bounds)
+
+        case .off:
             return image
         }
 
         return effect
             .applyingFilter("CIBlendWithMask", parameters: [
                 kCIInputBackgroundImageKey: image,
-                kCIInputMaskImageKey: featheredMask(placement: placement, radius: radius)
+                kCIInputMaskImageKey: featheredMask(placement: placement, radius: maskRadius)
             ])
             .cropped(to: extent)
+    }
+
+    private static func isolatedChannel(
+        _ image: CIImage,
+        red: Bool,
+        green: Bool,
+        blue: Bool
+    ) -> CIImage {
+        image.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: red ? 1 : 0, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: green ? 1 : 0, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: blue ? 1 : 0, w: 0),
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+            "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1)
+        ])
     }
 
     /// A soft-edged ellipse, as a mask.

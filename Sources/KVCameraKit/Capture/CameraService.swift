@@ -29,6 +29,15 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         didSet {
             guard censorMode != oldValue else { return }
             updateCensorSubscription()
+            scheduleRecordingEffectPreparation()
+        }
+    }
+
+    var faceEffect: CameraFaceEffect = .off {
+        didSet {
+            guard faceEffect != oldValue else { return }
+            updateCensorSubscription()
+            scheduleRecordingEffectPreparation()
         }
     }
 
@@ -190,7 +199,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         // queued behind it on this queue. See `CameraFrameTap.pin(to:)`, which exists because
         // that shipped once. Where the censor cannot be honoured anyway, paying for it would be
         // the same bug for no feature at all.
-        censorTracker.isEnabled = censorMode.isEnabled && isCensorSupported
+        censorTracker.isEnabled = (censorMode.isEnabled || faceEffect.isEnabled) && isCensorSupported
 
         guard censorTracker.isEnabled else {
             censorSubscription?.cancel()
@@ -698,6 +707,19 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
         return raw
     }
 
+    /// The preview shader is already compiled by the live Metal renderer, but recorded pixels
+    /// use Core Image. Preparing that separate graph here prevents its lazy compiler from
+    /// blocking the first writer frame and creating a timestamp gap at the head of the file.
+    func prepareRecordingEffects() async {
+        guard isCensorSupported else { return }
+        await CensorVideoStage.prepare(mode: censorMode, faceEffect: faceEffect)
+    }
+
+    private func scheduleRecordingEffectPreparation() {
+        guard isCensorSupported else { return }
+        CensorVideoStage.schedulePreparation(mode: censorMode, faceEffect: faceEffect)
+    }
+
     func startRecording(to destination: RecordingDestination) {
         switch (recordingEngine, destination) {
         case (.movieFile, .file(let outputURL)):
@@ -718,7 +740,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             // The rotation is baked in as a track transform rather than by rotating pixels:
             // one matrix in the container header instead of a full-frame copy 30 times a
             // second, and every player honours it.
-            installCensorStage()
+            installFaceStage()
             assetWriter.start(
                 to: outputURL,
                 rotationDegrees: latestCaptureAngle,
@@ -732,7 +754,7 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
             // has to drain it before anything can be committed.
             let pump = CaptureStreamPump(sink: sink)
             streamPump = pump
-            installCensorStage()
+            installFaceStage()
             assetWriter.startStreaming(
                 rotationDegrees: latestCaptureAngle,
                 includesAudio: isAudioTapAttached,
@@ -757,13 +779,14 @@ final class CameraService: NSObject, CameraCapturing, @unchecked Sendable {
     ///
     /// The stage subscribes to the *tracker*, not to a snapshot: a recording that started with
     /// nobody in frame has to censor the face that walks into it.
-    private func installCensorStage() {
-        guard censorMode.isEnabled, isCensorSupported else {
+    private func installFaceStage() {
+        guard (censorMode.isEnabled || faceEffect.isEnabled), isCensorSupported else {
             assetWriter.videoStage = nil
             return
         }
         let stage = CensorVideoStage()
         stage.mode = censorMode
+        stage.faceEffect = faceEffect
         stage.regions = { [weak self] in self?.censorTracker.regions ?? [] }
         assetWriter.videoStage = stage
 

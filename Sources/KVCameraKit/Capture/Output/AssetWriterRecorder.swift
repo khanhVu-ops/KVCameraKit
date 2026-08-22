@@ -31,6 +31,21 @@ final class AssetWriterRecorder: @unchecked Sendable {
     /// a race between two callbacks.
     private let writerQueue = DispatchQueue(label: "com.iosvault.camera.assetWriterQueue")
 
+    /// At most one sensor buffer may wait behind the frame currently being rendered.
+    ///
+    /// Core Image's first effect render used to block this queue while compilation happened,
+    /// but `appendVideo` kept enqueueing 30 buffers per second. Besides recording stale frames,
+    /// those retained buffers drained AVFoundation's finite pool and froze the live camera.
+    /// Replacing the pending sample with the newest one keeps latency bounded: under pressure
+    /// the recorder drops intermediate frames instead of becoming progressively later.
+    private let pendingVideo = LatestFrameSlot<CMSampleBuffer>()
+
+    /// Poster encoding is deliberately off the real-time writer queue. A small group lets
+    /// `stop()` wait for at most the two queued JPEGs before it hands the summary to the host.
+    private let posterQueue = DispatchQueue(label: "com.iosvault.camera.posterQueue", qos: .utility)
+    private let posterGroup = DispatchGroup()
+    private let posterLock = NSLock()
+
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
     private var audioInput: AVAssetWriterInput?
@@ -153,7 +168,13 @@ final class AssetWriterRecorder: @unchecked Sendable {
         self.firstVideoTime = nil
         self.lastVideoEndTime = nil
         self.videoDimensions = nil
-        self.posterData = nil
+        self.hasRequestedFallbackPoster = false
+        self.hasRequestedSettledPoster = false
+        posterLock.lock()
+        posterSessionID = UUID()
+        posterCandidateTime = nil
+        posterData = nil
+        posterLock.unlock()
     }
 
     /// The rotation to bake into the track, from the same coordinator that drives the preview.
@@ -171,7 +192,16 @@ final class AssetWriterRecorder: @unchecked Sendable {
     private var firstVideoTime: CMTime?
     private var lastVideoEndTime: CMTime?
     private var videoDimensions: CMVideoDimensions?
+    private var hasRequestedFallbackPoster = false
+    private var hasRequestedSettledPoster = false
+    private var posterSessionID = UUID()
+    private var posterCandidateTime: CMTime?
     private var posterData: Data?
+
+    /// Half a second avoids the opening frame while still representing the beginning of the
+    /// clip. The first appended frame is retained as a fallback for recordings shorter than
+    /// this window.
+    static let posterSettleOffset: TimeInterval = 0.5
 
     /// Finishes the recording, or returns `nil` if nothing was ever written.
     ///
@@ -223,9 +253,16 @@ final class AssetWriterRecorder: @unchecked Sendable {
                 duration: recordedDuration(),
                 pixelWidth: orientedDimensions()?.width,
                 pixelHeight: orientedDimensions()?.height,
-                posterData: posterData
+                posterData: finishedPosterData()
             ))
         }
+    }
+
+    private func finishedPosterData() -> Data? {
+        posterGroup.wait()
+        posterLock.lock()
+        defer { posterLock.unlock() }
+        return posterData
     }
 
     /// Measured from the samples' own timestamps rather than from a wall clock, which
@@ -263,9 +300,8 @@ final class AssetWriterRecorder: @unchecked Sendable {
     /// Called on the frame queue.
     func appendVideo(_ frame: CameraFrame) {
         let sampleBuffer = frame.sampleBuffer
-        writerQueue.async { [weak self] in
-            self?.handleVideo(sampleBuffer)
-        }
+        guard pendingVideo.submit(sampleBuffer) else { return }
+        writerQueue.async { [weak self] in self?.drainLatestVideo() }
     }
 
     /// Called on the audio queue.
@@ -301,7 +337,8 @@ final class AssetWriterRecorder: @unchecked Sendable {
 
         let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
-        if !hasStartedSession {
+        let isFirstVideoFrame = !hasStartedSession
+        if isFirstVideoFrame {
             guard writer.status == .unknown else { return }
             // Audio input is added *before* `startWriting`, because inputs cannot be added
             // afterwards — so it is created here even though the first audio sample may not
@@ -323,20 +360,27 @@ final class AssetWriterRecorder: @unchecked Sendable {
             writer.startSession(atSourceTime: presentationTime)
             hasStartedSession = true
             firstVideoTime = presentationTime
-
-            // The poster comes from the first frame that actually made it into the file.
-            // Rendered off writerQueue so JPEG encoding never delays the first video frame.
-            let angle = rotationDegrees
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                let poster = CapturePosterRenderer.jpeg(from: sampleBuffer, rotationAngle: angle)
-                self?.writerQueue.async {
-                    self?.posterData = poster
-                }
-            }
         }
 
         guard writer.status == .writing, videoInput.isReadyForMoreMediaData else { return }
-        videoInput.append(sampleBuffer)
+        guard videoInput.append(sampleBuffer) else { return }
+
+        if needsInFlightPoster {
+            // The first appended frame guarantees a thumbnail for a sub-half-second clip.
+            if !hasRequestedFallbackPoster {
+                hasRequestedFallbackPoster = true
+                schedulePoster(from: sampleBuffer, at: presentationTime)
+            }
+
+            // Replace that fallback once the recording has had time to settle. Exactly one
+            // later frame is encoded; doing this continuously would waste work on a 30 fps path.
+            if !hasRequestedSettledPoster,
+               let firstVideoTime,
+               (presentationTime - firstVideoTime).seconds >= Self.posterSettleOffset {
+                hasRequestedSettledPoster = true
+                schedulePoster(from: sampleBuffer, at: presentationTime)
+            }
+        }
 
         // Duration is the end of the last frame, not its start — otherwise every recording
         // is one frame short, which is invisible until someone compares it to the timer.
@@ -344,6 +388,56 @@ final class AssetWriterRecorder: @unchecked Sendable {
         lastVideoEndTime = sampleDuration.isValid && sampleDuration.isNumeric
             ? presentationTime + sampleDuration
             : presentationTime
+    }
+
+    /// Writer queue only. One frame per dispatch turn lets audio already waiting on the queue
+    /// run between expensive video renders; looping until the slot is empty would starve audio
+    /// whenever rendering falls below the capture frame rate.
+    private func drainLatestVideo() {
+        guard let sampleBuffer = pendingVideo.take() else {
+            if pendingVideo.finishTurn() {
+                writerQueue.async { [weak self] in self?.drainLatestVideo() }
+            }
+            return
+        }
+        handleVideo(sampleBuffer)
+        if pendingVideo.finishTurn() {
+            writerQueue.async { [weak self] in self?.drainLatestVideo() }
+        }
+    }
+
+    private var needsInFlightPoster: Bool {
+        if case .stream = destination { return true }
+        return false
+    }
+
+    /// Encodes a candidate without delaying sample intake. Completion order is intentionally
+    /// irrelevant: the timestamp wins, so a slow first-frame encode cannot overwrite the
+    /// settled poster. The session token prevents work from an abandoned recording leaking
+    /// into the next one.
+    private func schedulePoster(from sampleBuffer: CMSampleBuffer, at time: CMTime) {
+        posterLock.lock()
+        let sessionID = posterSessionID
+        posterLock.unlock()
+
+        let angle = rotationDegrees
+        let group = posterGroup
+        group.enter()
+        posterQueue.async { [weak self] in
+            defer { group.leave() }
+            guard let self,
+                  let poster = CapturePosterRenderer.jpeg(from: sampleBuffer, rotationAngle: angle)
+            else { return }
+
+            self.posterLock.lock()
+            defer { self.posterLock.unlock() }
+            guard self.posterSessionID == sessionID else { return }
+            if let current = self.posterCandidateTime, CMTimeCompare(time, current) <= 0 {
+                return
+            }
+            self.posterCandidateTime = time
+            self.posterData = poster
+        }
     }
 
     /// Writer queue only.
@@ -447,5 +541,42 @@ final class AssetWriterRecorder: @unchecked Sendable {
             lock.unlock()
             onSegment(segmentData)
         }
+    }
+}
+
+/// A bounded hand-off from a real-time producer to a slower serial consumer.
+///
+/// `submit` returns `true` exactly when the caller must schedule a drain. While that drain is
+/// running, newer values replace the one pending value. The consumer therefore always sees the
+/// freshest value available at each turn, never an unbounded stale backlog.
+final class LatestFrameSlot<Element>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var latest: Element?
+    private var isDrainScheduled = false
+
+    func submit(_ value: Element) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        latest = value
+        guard !isDrainScheduled else { return false }
+        isDrainScheduled = true
+        return true
+    }
+
+    func take() -> Element? {
+        lock.lock()
+        defer { lock.unlock() }
+        let value = latest
+        latest = nil
+        return value
+    }
+
+    /// Returns whether another drain turn must be scheduled.
+    func finishTurn() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if latest != nil { return true }
+        isDrainScheduled = false
+        return false
     }
 }

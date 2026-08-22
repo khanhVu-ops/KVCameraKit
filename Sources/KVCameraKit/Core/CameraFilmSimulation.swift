@@ -6,7 +6,7 @@ import Foundation
 /// Colour lives in the LUT. Grain and light leaks are spatial effects, so keeping them here
 /// prevents a preset from pretending a colour cube can encode position-dependent texture.
 ///
-/// The two constants below are the reason this type has more in it than two floats. Both the
+/// The constants and shared emulsion tile below are why this type has more in it than two floats. Both the
 /// fragment shader and the Core Image path have to place these effects, and they were placing
 /// them differently — the same preset produced one grain in the viewfinder and a seven-times
 /// coarser one on the filter-strip chip beside it, and put the light leak on two different
@@ -36,12 +36,30 @@ public struct CameraFilmSimulation: Equatable, Sendable {
     /// while a 160 px chip showed grain seven times coarser than the photo would have. Same
     /// number, same preset, two unrelated textures.
     ///
-    /// Duplicated as `kGrainCellsAcrossHeight` in `CameraPreview.metal`, which is the one place
-    /// a constant is allowed to appear twice here — a shader cannot read this.
-    public static let grainCellsAcrossHeight: CGFloat = 320
+    /// Duplicated with the other scalar response constants in `CameraPreview.metal`, because a
+    /// shader cannot read Swift values. Parity tests pin every duplicate; the texture itself is
+    /// not duplicated and is uploaded directly from `grainTileBytes`.
+    public static let grainCellsAcrossHeight: CGFloat = 220
 
     /// Grain amplitude at `grain == 1`, as a fraction of full range. Matches the shader.
-    static let grainAmplitude: CGFloat = 0.095
+    static let grainAmplitude: CGFloat = 0.075
+
+    /// The deterministic dye-cloud field sampled by every renderer.
+    ///
+    /// Core Image used to invent its texture with `CIRandomGenerator`, while Metal evaluated a
+    /// different sine hash. Even equal frequency and strength cannot make two unrelated random
+    /// fields look alike. This tile is the single source now: Core Image repeats it directly and
+    /// the live renderer uploads these same bytes as an `r8Unorm` texture.
+    static let grainTileCells: Int = 128
+    static let grainTexelsPerCell: Int = 4
+    static let grainTileDimension: Int = grainTileCells * grainTexelsPerCell
+    static let grainTileBytes: [UInt8] = makeGrainTile()
+
+    /// Midtone density response shared with the shader.
+    static let grainShadowStart: CGFloat = 0.03
+    static let grainShadowFull: CGFloat = 0.22
+    static let grainHighlightStart: CGFloat = 0.65
+    static let grainHighlightEnd: CGFloat = 0.90
 
     /// The light leak's centre, in the **upright** image's normalised space with y running down.
     ///
@@ -67,6 +85,15 @@ public struct CameraFilmSimulation: Equatable, Sendable {
     /// the same square whichever way the buffer is lying.
     static func grainCellSize(uprightHeight: CGFloat) -> CGFloat {
         max(uprightHeight / grainCellsAcrossHeight, 1)
+    }
+
+    /// A stable offset into the shared tile. A still and its shelf chip use the same seed; live
+    /// video changes seed in quantised steps so the emulsion re-rolls instead of sliding.
+    static func grainTileOffset(seed: Float) -> CGPoint {
+        CGPoint(
+            x: CGFloat(fraction(seed * 0.754_877_7)) * CGFloat(grainTileDimension),
+            y: CGFloat(fraction(seed * 0.569_840_3)) * CGFloat(grainTileDimension)
+        )
     }
 
     /// The leak's centre in normalised **sensor-buffer** coordinates, origin top-left, y down.
@@ -99,5 +126,70 @@ public struct CameraFilmSimulation: Equatable, Sendable {
         case 3:  return CGPoint(x: 1 - v, y: u)
         default: return CGPoint(x: u, y: v)
         }
+    }
+
+    // MARK: - Shared emulsion tile
+
+    /// Two periodic value-noise octaves approximate overlapping dye clouds. Periodicity is not
+    /// optional: both GPU samplers repeat this texture, and a non-periodic edge becomes a faint
+    /// grid over flat skies. Sampling the same baked bytes also removes floating-point `sin`
+    /// differences between Core Image and Metal devices.
+    private static func makeGrainTile() -> [UInt8] {
+        let dimension = grainTileDimension
+        let texelsPerCell = Float(grainTexelsPerCell)
+        var bytes = [UInt8](repeating: 0, count: dimension * dimension)
+
+        for y in 0..<dimension {
+            for x in 0..<dimension {
+                let point = SIMD2<Float>(Float(x) / texelsPerCell, Float(y) / texelsPerCell)
+                let broad = periodicValueNoise(point, period: grainTileCells)
+                let fine = periodicValueNoise(
+                    point * 2 + SIMD2<Float>(13.7, 31.9),
+                    period: grainTileCells * 2
+                )
+                let value = min(max(broad * 0.68 + fine * 0.32, 0), 1)
+                bytes[y * dimension + x] = UInt8((value * 255).rounded())
+            }
+        }
+        return bytes
+    }
+
+    private static func periodicValueNoise(_ point: SIMD2<Float>, period: Int) -> Float {
+        let ix = Int(floor(point.x))
+        let iy = Int(floor(point.y))
+        let fraction = SIMD2<Float>(point.x - floor(point.x), point.y - floor(point.y))
+        let smooth = fraction * fraction * (SIMD2<Float>(repeating: 3) - 2 * fraction)
+
+        let a = periodicHash(x: ix, y: iy, period: period)
+        let b = periodicHash(x: ix + 1, y: iy, period: period)
+        let c = periodicHash(x: ix, y: iy + 1, period: period)
+        let d = periodicHash(x: ix + 1, y: iy + 1, period: period)
+        return mix(mix(a, b, smooth.x), mix(c, d, smooth.x), smooth.y)
+    }
+
+    private static func periodicHash(x: Int, y: Int, period: Int) -> Float {
+        let wrappedX = positiveModulo(x, period)
+        let wrappedY = positiveModulo(y, period)
+        var value = UInt32(truncatingIfNeeded: wrappedX &* 0x1f123bb5)
+        value ^= UInt32(truncatingIfNeeded: wrappedY &* 0x5f356495)
+        value ^= value >> 16
+        value &*= 0x7feb352d
+        value ^= value >> 15
+        value &*= 0x846ca68b
+        value ^= value >> 16
+        return Float(value & 0x00ff_ffff) / Float(0x0100_0000)
+    }
+
+    private static func positiveModulo(_ value: Int, _ divisor: Int) -> Int {
+        let remainder = value % divisor
+        return remainder >= 0 ? remainder : remainder + divisor
+    }
+
+    private static func mix(_ a: Float, _ b: Float, _ t: Float) -> Float {
+        a + (b - a) * t
+    }
+
+    private static func fraction(_ value: Float) -> Float {
+        value - floor(value)
     }
 }

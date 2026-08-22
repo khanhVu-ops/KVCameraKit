@@ -56,10 +56,31 @@ enum VideoArtifactReader {
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: 640, height: 640)
         var poster: Data?
-        if let image = try? await generator.image(at: .zero).image {
-            poster = UIImage(cgImage: image).jpegData(compressionQuality: 0.85)
+        let preferredTime = VideoPosterSelection.preferredTime(for: duration)
+        let candidateTimes = preferredTime == .zero ? [.zero] : [preferredTime, .zero]
+        for time in candidateTimes {
+            if let image = try? await generator.image(at: time).image {
+                poster = UIImage(cgImage: image).jpegData(compressionQuality: 0.85)
+                break
+            }
         }
 
         return (poster, duration.flatMap { $0.isFinite ? $0 : nil }, width, height)
+    }
+}
+
+/// Chooses a representative early frame without freezing the actual opening frame into every
+/// library thumbnail. Kept pure so short-clip clamping is testable without an AVAsset.
+enum VideoPosterSelection {
+    static let settledOffset: TimeInterval = 0.5
+
+    static func preferredTime(for duration: TimeInterval?) -> CMTime {
+        let seconds: TimeInterval
+        if let duration, duration.isFinite, duration > 0 {
+            seconds = min(settledOffset, duration / 2)
+        } else {
+            seconds = settledOffset
+        }
+        return CMTime(seconds: seconds, preferredTimescale: 600)
     }
 }

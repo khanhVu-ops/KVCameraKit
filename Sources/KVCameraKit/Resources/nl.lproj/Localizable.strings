@@ -50,9 +50,15 @@
    name every stage that is currently changing the picture. */
 "Mosaic" = "Mozaïek";
 "Blur" = "Vervagen";
-"Censor Bar" = "Censuurbalk";
 "Privacy" = "Privacy";
 "No look applied" = "Geen look toegepast";
 "Reset look" = "Look herstellen";
 "Faces are covered in the photo and the video, not just on screen" = "Gezichten worden bedekt in de foto en de video, niet alleen op het scherm";
 "Face censoring is unavailable in this build" = "Gezichten bedekken is niet beschikbaar in deze versie";
+
+/* Face effects and the chromatic privacy censor. */
+"Censor" = "Censuur";
+"Face FX" = "Gezichtseffecten";
+"Big Eyes" = "Grote ogen";
+"Slim Face" = "Slank gezicht";
+"Funhouse" = "Lachspiegel";

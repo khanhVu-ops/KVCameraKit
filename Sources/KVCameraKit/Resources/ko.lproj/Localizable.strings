@@ -50,9 +50,15 @@
    name every stage that is currently changing the picture. */
 "Mosaic" = "모자이크";
 "Blur" = "흐리게";
-"Censor Bar" = "검은 막대";
 "Privacy" = "개인 정보";
 "No look applied" = "적용된 효과 없음";
 "Reset look" = "효과 초기화";
 "Faces are covered in the photo and the video, not just on screen" = "화면뿐 아니라 사진과 동영상에도 얼굴이 가려집니다";
 "Face censoring is unavailable in this build" = "이 빌드에서는 얼굴 가리기를 사용할 수 없습니다";
+
+/* Face effects and the chromatic privacy censor. */
+"Censor" = "검열";
+"Face FX" = "얼굴 효과";
+"Big Eyes" = "큰 눈";
+"Slim Face" = "갸름한 얼굴";
+"Funhouse" = "왜곡 거울";

@@ -18,12 +18,12 @@ public struct CaptureVideoSummary: Sendable {
     public let duration: TimeInterval?
     public let pixelWidth: Int?
     public let pixelHeight: Int?
-    /// A poster frame, JPEG, taken from the first frame that went into the file.
+    /// A poster frame, JPEG, taken shortly after recording starts.
     ///
-    /// Taken there because by the time recording stops there is no file left to read one
-    /// from — the bytes went straight to the host and, in this app's case, are encrypted.
-    /// A poster from the first frame is also what the thumbnail wants: the moment the user
-    /// pressed record.
+    /// Captured on the way in because by the time recording stops there is no plaintext file
+    /// left to read one from — the bytes went straight to the host and, in this app's case,
+    /// are encrypted. The recorder avoids the literal first frame so exposure, focus and the
+    /// user's shutter gesture have time to settle.
     public let posterData: Data?
 
     public init(

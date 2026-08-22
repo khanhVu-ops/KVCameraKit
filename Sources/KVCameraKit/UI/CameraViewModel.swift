@@ -74,8 +74,10 @@ struct CameraState: Equatable, Sendable {
     /// selection to recompute from: a user who set smoothing and closed the shelf expects to land
     /// back on Beauty, not on Styles.
     var lastLookTab: CameraLookShelfTab = .styles
-    /// Privacy face censoring mode (Off / Mosaic / Blur / Censor Bar).
+    /// Privacy face censoring mode (Off / Mosaic / Blur / chromatic Censor).
     var censorMode: CameraCensorMode = .off
+    /// Playful face deformation, explicitly separate from privacy censoring.
+    var faceEffect: CameraFaceEffect = .off
     /// Whether this build can censor at all — a fact about the preview and recording engines,
     /// read once on appear. See `CameraService.isCensorSupported`.
     ///
@@ -141,6 +143,9 @@ struct CameraState: Equatable, Sendable {
         if beauty.isEnabled {
             stages.append(CameraLookStage(kind: .beauty, title: CameraLookShelfTab.beauty.title))
         }
+        if faceEffect.isEnabled {
+            stages.append(CameraLookStage(kind: .faceEffect, title: faceEffect.title))
+        }
         if censorMode.isEnabled {
             stages.append(CameraLookStage(kind: .censor, title: censorMode.title))
         }
@@ -187,6 +192,7 @@ final class CameraViewModel {
         case closeShelf
         case setFilter(CameraFilter)
         case setBeauty(CameraBeauty)
+        case setFaceEffect(CameraFaceEffect)
         case setCensorMode(CameraCensorMode)
         /// Back to no look at all: no filter, no beauty, no censor.
         case resetLook
@@ -437,6 +443,12 @@ final class CameraViewModel {
             guard state.mode.supportsFilters else { return }
             state.beauty = beauty
 
+        case .setFaceEffect(let effect):
+            guard state.isCensorSupported else { return }
+            state.faceEffect = effect
+            cameraService.faceEffect = effect
+            CameraHaptic.selection.play()
+
         case .setCensorMode(let mode):
             // Refused rather than accepted-and-ignored. A censor mode this build cannot honour
             // is not a degraded feature, it is a screen telling the user their face is covered
@@ -450,6 +462,10 @@ final class CameraViewModel {
         case .resetLook:
             state.filter = .original
             state.beauty = .off
+            if state.faceEffect.isEnabled {
+                state.faceEffect = .off
+                cameraService.faceEffect = .off
+            }
             if state.censorMode.isEnabled {
                 state.censorMode = .off
                 cameraService.censorMode = .off
@@ -654,24 +670,36 @@ final class CameraViewModel {
                 // it now lives in exactly one place.
                 let filter = state.filter
                 let beauty = state.beauty
+                let faceEffect = state.faceEffect
                 let censorMode = state.censorMode
                 // The geometry the viewfinder was drawing, read here on the main actor before
                 // the render task starts. `CameraLookRenderer` unions it with its own detection
                 // pass rather than trusting either alone.
-                let regions = censorMode.isEnabled ? cameraService.censorRegions : []
+                let regions = (censorMode.isEnabled || faceEffect.isEnabled) ? cameraService.censorRegions : []
                 let filtered = await Task.detached(priority: .userInitiated) {
-                    func render(_ data: Data) -> (data: Data, fileExtension: String)? {
+                    let exposureCompensation = filter.isNeutral ? 0 : (shot.preview.map {
+                        CameraLookRenderer.exposureCompensation(captured: shot.data, reference: $0)
+                    } ?? 0)
+                    func render(
+                        _ data: Data,
+                        sourceExposureCompensation: Float = 0
+                    ) -> (data: Data, fileExtension: String)? {
                         CameraLookRenderer.apply(
                             filter: filter,
                             beauty: beauty,
+                            faceEffect: faceEffect,
                             censorMode: censorMode,
                             liveRegions: regions,
-                            to: data
+                            to: data,
+                            sourceExposureCompensation: sourceExposureCompensation
                         )
                     }
                     return (
-                        full: render(shot.data),
-                        preview: shot.preview.flatMap(render)
+                        full: render(
+                            shot.data,
+                            sourceExposureCompensation: exposureCompensation
+                        ),
+                        preview: shot.preview.flatMap { render($0) }
                     )
                 }.value
 
@@ -803,6 +831,12 @@ final class CameraViewModel {
 
         recordingStartTask = Task {
             do {
+                // Core Image compiles distortion kernels lazily. Await the selection-time
+                // warm-up before the writer sees its first timestamp; otherwise that first
+                // frame is stored, compilation blocks the next ones, and players display it
+                // frozen for the opening second or two.
+                await cameraService.prepareRecordingEffects()
+                guard !Task.isCancelled else { return }
                 cameraService.startRecording(to: try await makeRecordingDestination())
             } catch {
                 // Refused rather than diverted. The one destination this must never silently
@@ -895,8 +929,8 @@ final class CameraViewModel {
                     state.isSealing = false
                     return
                 }
-                // The poster was taken from the first frame of the recording, so unlike the
-                // file path there is nothing to decode and the card can fly immediately.
+                // The poster was captured from a settled early frame before encryption, so
+                // unlike the file path there is nothing to decode and the card can fly now.
                 if let poster = summary.posterData {
                     state.latestCapturedThumbnailData = poster
                     state.captureStage = .flying(CaptureFlight(id: UUID(), imageData: poster))
