@@ -36,23 +36,11 @@ struct CameraThumbnailButton: View {
     private var content: some View {
         ZStack {
             if let image = image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: Self.side, height: Self.side)
-                    .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
-                            .stroke(
-                                LinearGradient(
-                                    colors: [Color.white.opacity(0.6), Color.white.opacity(0.2)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                ),
-                                lineWidth: 1.5
-                            )
-                    )
-                    .shadow(color: Color.black.opacity(0.4), radius: 6, x: 0, y: 2)
+                ZStack {
+                    stackCard(rotation: -9, xOffset: -4)
+                    stackCard(rotation: 7, xOffset: 4)
+                    primaryCard(image)
+                }
             } else {
                 RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
                     .fill(.ultraThinMaterial)
@@ -87,9 +75,47 @@ struct CameraThumbnailButton: View {
         .scaleEffect(scale)
         .animation(.easeInOut(duration: 0.2), value: isSealing)
         .onAppear { image = Self.decode(imageData) }
-        .onChange(of: imageData) { newValue in
+        .onChange(of: imageData) { _, newValue in
             image = Self.decode(newValue)
         }
+    }
+
+    /// Two translucent cards make the control read as a library stack while keeping the
+    /// latest capture as the only decoded bitmap. Repeating the image on every layer would
+    /// triple the texture work for details that are almost entirely covered.
+    private func stackCard(rotation: Double, xOffset: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: Self.cornerRadius - 2, style: .continuous)
+            .fill(Color.white.opacity(0.18))
+            .frame(width: Self.side - 4, height: Self.side - 4)
+            .overlay {
+                RoundedRectangle(cornerRadius: Self.cornerRadius - 2, style: .continuous)
+                    .stroke(Color.white.opacity(0.38), lineWidth: 1)
+            }
+            .rotationEffect(.degrees(rotation))
+            .offset(x: xOffset, y: 1)
+            .shadow(color: Color.black.opacity(0.28), radius: 3, x: 0, y: 2)
+            .accessibilityHidden(true)
+    }
+
+    private func primaryCard(_ image: UIImage) -> some View {
+        Image(uiImage: image)
+            .resizable()
+            .scaledToFill()
+            .frame(width: Self.side, height: Self.side)
+            .overlay {
+                RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.72), Color.white.opacity(0.24)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1.5
+                    )
+            }
+            .compositingGroup()
+            .clipShape(RoundedRectangle(cornerRadius: Self.cornerRadius, style: .continuous))
+            .shadow(color: Color.black.opacity(0.42), radius: 6, x: 0, y: 2)
     }
 
     /// Downscaled at decode time. The source is either a 320 px vault thumbnail or a
